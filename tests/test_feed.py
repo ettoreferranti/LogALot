@@ -9,7 +9,7 @@ np = pytest.importorskip("numpy")
 
 from logalot.asr import Segment  # noqa: E402
 from logalot.capture import RigState  # noqa: E402
-from logalot.feed import TranscriptFeed  # noqa: E402
+from logalot.feed import TranscriptFeed, is_repetitive  # noqa: E402
 
 
 class FakeAudio:
@@ -28,13 +28,14 @@ class FakeAudio:
 
 
 class StubTranscriber:
-    def __init__(self, text="hotel bravo nine"):
+    def __init__(self, text="hotel bravo nine", avg_logprob=-0.3):
         self.text = text
+        self.avg_logprob = avg_logprob
         self.calls = 0
 
     def transcribe(self, audio16k):
         self.calls += 1
-        return [Segment(text=self.text, start_s=0.0, end_s=1.0, avg_logprob=-0.3)]
+        return [Segment(text=self.text, start_s=0.0, end_s=1.0, avg_logprob=self.avg_logprob)]
 
 
 class StubCat:
@@ -101,6 +102,60 @@ def test_feed_skips_segments_while_transmitting():
     finally:
         feed.stop()
     assert tr.calls == 0
+
+
+def test_is_repetitive_on_real_whisper_garbage():
+    # Lines actually captured off-air during the first live test.
+    assert is_repetitive("pink " * 100)
+    assert is_repetitive("Delta " + "pink " * 80)
+    assert is_repetitive(". . . . . .")
+    assert is_repetitive("Brains pink pink pink Brains pink Brains pink Brains pink")
+
+
+def test_is_repetitive_passes_normal_speech():
+    assert not is_repetitive("made an NVIS aerial for 40 metres and it was enormous")
+    assert not is_repetitive("pink pink")           # too short to judge
+    assert not is_repetitive("CQ CQ this is Hotel Bravo Nine India Kilo Sierra")
+
+
+def _drain_for_transcript(sub, timeout=1.5):
+    """Return the first TranscriptEntry seen, or None if only non-entries arrive."""
+    import time as _t
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        try:
+            msg = sub.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if not isinstance(msg, dict):   # TranscriptEntry, not a candidate
+            return msg
+    return None
+
+
+def test_feed_drops_repetitive_transcript():
+    audio = FakeAudio()
+    tr = StubTranscriber("pink " * 100)
+    feed = TranscriptFeed(audio, tr)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        assert _drain_for_transcript(sub) is None
+    finally:
+        feed.stop()
+
+
+def test_feed_drops_low_logprob_transcript():
+    audio = FakeAudio()
+    tr = StubTranscriber("pink", avg_logprob=-3.8)
+    feed = TranscriptFeed(audio, tr, min_logprob=-1.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        assert _drain_for_transcript(sub) is None
+    finally:
+        feed.stop()
 
 
 def test_feed_builds_advisory_candidate():

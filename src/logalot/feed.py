@@ -28,6 +28,17 @@ from .validate import confidence_flag, normalise_call
 _LLM_FIELDS = ("name", "qth", "rst_sent", "rst_rcvd", "gridsquare", "comment")
 
 
+def is_repetitive(text: str) -> bool:
+    """True if one token dominates the text — Whisper's repetition hallucination
+    on noise/carriers ('pink pink pink…', '. . . .'). Short segments are exempt
+    (a genuine 'pink pink' could be real)."""
+    words = text.lower().split()
+    if len(words) < 6:
+        return False
+    most = max(collections.Counter(words).values())
+    return most / len(words) > 0.5
+
+
 @dataclass(slots=True)
 class TranscriptEntry:
     utc: str
@@ -40,7 +51,7 @@ class TranscriptEntry:
 class TranscriptFeed:
     def __init__(self, audio, transcriber, cat=None, parser=None, history: int = 200,
                  parse_debounce_s: float = 1.2, qso_idle_reset_s: float = 45.0,
-                 vad_threshold_dbfs: float = -45.0) -> None:
+                 vad_threshold_dbfs: float = -45.0, min_logprob: float = -1.0) -> None:
         self.audio = audio
         self.transcriber = transcriber
         self.cat = cat                 # PTT (skip TX) + CAT snapshot for candidates
@@ -51,6 +62,9 @@ class TranscriptFeed:
         # band noise floor (watch the dashboard's Audio RX dBFS) so SSB hiss
         # doesn't read as one endless utterance.
         self.vad_threshold_dbfs = vad_threshold_dbfs
+        # Drop transcripts below this mean token logprob — Whisper's low-confidence
+        # noise garbage (the very negative-logprob lines).
+        self.min_logprob = min_logprob
 
         self.entries: collections.deque[TranscriptEntry] = collections.deque(maxlen=history)
         self.last_candidate: dict | None = None
@@ -115,15 +129,18 @@ class TranscriptFeed:
         audio16k = resample_to_16k(seg, self.audio.samplerate)
         segments = self.transcriber.transcribe(audio16k)
         text = " ".join(s.text for s in segments).strip()
-        if not text:
+        if not text or is_repetitive(text):
             return
         logps = [s.avg_logprob for s in segments if s.avg_logprob is not None]
+        avg_logprob = sum(logps) / len(logps) if logps else None
+        if avg_logprob is not None and avg_logprob < self.min_logprob:
+            return        # low-confidence noise garbage
         entry = TranscriptEntry(
             utc=dt.datetime.now(dt.timezone.utc).strftime("%H:%M:%S"),
             text=text,
             speaker="RX",
             dur_s=round(len(seg) / self.audio.samplerate, 1),
-            avg_logprob=(sum(logps) / len(logps) if logps else None),
+            avg_logprob=avg_logprob,
         )
         with self._lock:
             self.entries.append(entry)

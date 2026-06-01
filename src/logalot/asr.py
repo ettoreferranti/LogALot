@@ -162,8 +162,11 @@ class WhisperTranscriber:
         def _run() -> dict:
             import mlx_whisper  # lazy: needs the [asr] extra (Apple Silicon)
 
+            # condition_on_previous_text=False stops Whisper from spiralling into
+            # repetition loops ("pink pink pink…") when it hits noise/carriers.
             return mlx_whisper.transcribe(
-                audio, path_or_hf_repo=self.model_path, language=self.language
+                audio, path_or_hf_repo=self.model_path, language=self.language,
+                condition_on_previous_text=False,
             )
 
         result = run_blocking(_run)
