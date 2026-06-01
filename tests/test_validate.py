@@ -16,6 +16,27 @@ def test_expand_phonetics_mixed_punctuation():
     assert expand_phonetics("Whiskey-One, Alpha Whiskey.") == "W1AW"
 
 
+def test_expand_phonetics_keeps_digits():
+    assert expand_phonetics("Echo Golf 20") == "EG20"
+    assert expand_phonetics("Echo Golf 2-0 Radio Charlie Hotel") == "EG20RCH"
+
+
+def test_expand_phonetics_passes_through_call_fragments():
+    # The LLM sometimes half-expands, leaving "HB9" then spelling the suffix.
+    assert expand_phonetics("HB9 India Kilo Sierra") == "HB9IKS"
+
+
+def test_expand_phonetics_german_alphabet():
+    assert expand_phonetics("Delta Lima Eins Anton Berta Caesar") == "DL1ABC"
+    assert expand_phonetics("Otto Emil neun Anton Berta") == "OE9AB"
+
+
+def test_expand_phonetics_drops_non_phonetic_words():
+    # 'fox' is not a phonetic word (NATO is 'foxtrot'); plain words are dropped.
+    assert expand_phonetics("the quick brown fox") == ""
+    assert expand_phonetics("hello there") == ""
+
+
 def test_valid_calls():
     for c in ["HB9IKS", "W1AW", "4X4AA", "2E0ABC", "DL1ABC"]:
         assert is_valid_call(c), c

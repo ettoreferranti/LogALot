@@ -51,20 +51,67 @@ NATO = {
     "niner": "9", "nine": "9", "six": "6", "seven": "7", "eight": "8",
 }
 
+# German (DIN 5009) spelling alphabet + numbers — HB9 works a lot of DL/OE/HB.
+GERMAN = {
+    "anton": "A", "berta": "B", "cäsar": "C", "caesar": "C", "casar": "C",
+    "dora": "D", "emil": "E", "friedrich": "F", "gustav": "G", "heinrich": "H",
+    "ida": "I", "julius": "J", "kaufmann": "K", "konrad": "K", "ludwig": "L",
+    "martha": "M", "nordpol": "N", "otto": "O", "paula": "P", "quelle": "Q",
+    "richard": "R", "samuel": "S", "siegfried": "S", "theodor": "T",
+    "ulrich": "U", "viktor": "V", "wilhelm": "W", "xaver": "X", "xanthippe": "X",
+    "ypsilon": "Y", "zacharias": "Z", "zeppelin": "Z",
+    "null": "0", "eins": "1", "zwei": "2", "zwo": "2", "drei": "3", "vier": "4",
+    "fünf": "5", "funf": "5", "sechs": "6", "sieben": "7", "acht": "8", "neun": "9",
+}
+
+# Russian spelling alphabet (best-effort: words whose Latin transliteration starts
+# with the letter they stand for) + numbers. Russian ops often use NATO too.
+RUSSIAN = {
+    "anna": "A", "boris": "B", "vasiliy": "V", "vasili": "V", "galina": "G",
+    "dmitriy": "D", "dmitri": "D", "yelena": "E", "elena": "E", "zinaida": "Z",
+    "ivan": "I", "konstantin": "K", "leonid": "L", "mikhail": "M",
+    "nikolai": "N", "nikolay": "N", "olga": "O", "pavel": "P", "roman": "R",
+    "sergei": "S", "sergey": "S", "semyon": "S", "tatiana": "T", "tatyana": "T",
+    "ulyana": "U", "fyodor": "F", "fedor": "F",
+    "nol": "0", "nul": "0", "odin": "1", "dva": "2", "tri": "3", "chetyre": "4",
+    "pyat": "5", "shest": "6", "sem": "7", "vosem": "8", "devyat": "9",
+}
+
+# Improvised / old-style phonetics: operators substitute place/word names,
+# especially for R, A, O. Each maps to its initial letter.
+INFORMAL = {
+    "radio": "R", "america": "A", "ocean": "O", "germany": "G", "england": "E",
+    "italy": "I", "japan": "J", "norway": "N", "mexico": "M", "canada": "C",
+    "denmark": "D", "florida": "F", "portugal": "P", "london": "L",
+    "boston": "B", "santiago": "S", "kilowatt": "K", "washington": "W",
+    "united": "U", "victoria": "V", "queen": "Q", "young": "Y", "zanzibar": "Z",
+    "ontario": "O", "honolulu": "H",
+}
+
+# Merged lookup. Keys are distinct across alphabets, so a plain merge is safe.
+PHONETICS = {**NATO, **GERMAN, **RUSSIAN, **INFORMAL}
+
 
 def expand_phonetics(text: str) -> str:
-    """Turn 'hotel bravo nine india kilo sierra' into 'HB9IKS'.
+    """Turn spoken phonetics into callsign characters: 'hotel bravo nine india
+    kilo sierra' -> 'HB9IKS', 'Echo Golf 20 Radio Charlie Hotel' -> 'EG20RCH'.
 
-    Tokens that are NATO words/digits map to their letter/digit; anything else is
-    dropped. Order is preserved. Whisper output is lower-cased and punctuated, so
-    we normalise aggressively.
+    Per token, in order: a known phonetic word (NATO/German/Russian) maps to its
+    letter/digit; a bare number is kept; an alphanumeric chunk that already
+    contains a digit (e.g. 'HB9', 'EG20') is passed through as a call fragment;
+    anything else is dropped. Whisper output is lower-cased and punctuated, so we
+    split aggressively.
     """
     out: list[str] = []
     for tok in re.split(r"[\s.,/-]+", text.strip().lower()):
         if not tok:
             continue
-        if tok in NATO:
-            out.append(NATO[tok])
+        if tok in PHONETICS:
+            out.append(PHONETICS[tok])
+        elif tok.isdigit():
+            out.append(tok)
+        elif tok.isalnum() and any(ch.isdigit() for ch in tok):
+            out.append(tok.upper())
     return "".join(out)
 
 

@@ -276,6 +276,42 @@ def test_feed_candidate_adds_country_for_valid_call():
     assert cand["call_country"] == "Switzerland"
 
 
+def test_feed_recovers_callsign_from_phonetics():
+    # LLM returns the call as spoken words; the backstop expands it.
+    audio = FakeAudio()
+    parser = StubParser({"call": "Echo Golf 20 Radio Charlie Hotel"})
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
+                          parser=parser, parse_debounce_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        cand = _get_candidate(sub)
+    finally:
+        feed.stop()
+    assert cand is not None
+    assert cand["call"] == "EG20RCH"
+    assert cand["call_country"] == "Spain"
+
+
+def test_feed_phonetic_partial_becomes_clean_tentative():
+    # Truncated phonetics expand to a clean (but invalid) tentative, not words.
+    audio = FakeAudio()
+    parser = StubParser({"call": "Echo Golf 20"})
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
+                          parser=parser, parse_debounce_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        cand = _get_candidate(sub)
+    finally:
+        feed.stop()
+    assert cand is not None
+    assert "call" not in cand
+    assert cand["call_tentative"] == "EG20"
+
+
 def test_feed_demotes_partial_call_to_tentative():
     # "G4" (prefix+digit, no suffix) must NOT populate the trusted call field.
     audio = FakeAudio()
