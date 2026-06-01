@@ -51,13 +51,18 @@ class TranscriptEntry:
 class TranscriptFeed:
     def __init__(self, audio, transcriber, cat=None, parser=None, history: int = 200,
                  parse_debounce_s: float = 1.2, qso_idle_reset_s: float = 45.0,
-                 vad_threshold_dbfs: float = -45.0, min_logprob: float = -1.0) -> None:
+                 vad_threshold_dbfs: float = -45.0, min_logprob: float = -1.0,
+                 parse_window_chars: int = 800) -> None:
         self.audio = audio
         self.transcriber = transcriber
         self.cat = cat                 # PTT (skip TX) + CAT snapshot for candidates
         self.parser = parser           # None -> no candidate panel
         self.parse_debounce_s = parse_debounce_s
         self.qso_idle_reset_s = qso_idle_reset_s
+        # Only the most recent ~this-many characters of transcript are parsed, so
+        # the candidate tracks the current exchange rather than a whole ragchew/net
+        # (feeding a small LLM a multi-over wall of text makes it grab stray words).
+        self.parse_window_chars = parse_window_chars
         # Speech gate: frames above this RMS count as voice. Raise it toward the
         # band noise floor (watch the dashboard's Audio RX dBFS) so SSB hiss
         # doesn't read as one endless utterance.
@@ -191,7 +196,7 @@ class TranscriptFeed:
             with self._lock:
                 version = self._win_version
                 idle = time.monotonic() - self._last_utterance_at
-                text = " ".join(e.text for e in self._window)
+                text = self._recent_text()
             if not text or version == last_version:
                 continue
             if idle < self.parse_debounce_s:   # let the operator finish speaking
@@ -200,6 +205,18 @@ class TranscriptFeed:
             last_version = version
             self.last_candidate = cand
             self._publish(cand)
+
+    def _recent_text(self) -> str:
+        """Most recent transcript text, newest-first, up to the char budget.
+        Caller holds the lock."""
+        parts: list[str] = []
+        total = 0
+        for e in reversed(self._window):
+            if parts and total + len(e.text) > self.parse_window_chars:
+                break
+            parts.append(e.text)
+            total += len(e.text)
+        return " ".join(reversed(parts))
 
     def _build_candidate(self, text: str) -> dict:
         try:

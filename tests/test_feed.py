@@ -227,6 +227,19 @@ def test_feed_vad_threshold_retunes_running_vad():
         feed.stop()
 
 
+def test_recent_text_caps_to_recent_window():
+    # The candidate must parse the recent exchange, not the whole ragchew.
+    feed = TranscriptFeed(FakeAudio(), StubTranscriber(), parse_window_chars=40)
+    for word in ["oldest filler text here", "middle filler text", "the newest over wins"]:
+        feed._window.append(
+            type("E", (), {"text": word})()  # lightweight entry-with-.text
+        )
+    text = feed._recent_text()
+    assert "newest over wins" in text
+    assert "oldest filler" not in text       # trimmed by the char budget
+    assert len(text) <= 60
+
+
 def test_feed_no_parser_means_no_candidate():
     audio = FakeAudio()
     feed = TranscriptFeed(audio, StubTranscriber(), parser=None)
