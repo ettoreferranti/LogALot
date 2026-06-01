@@ -120,19 +120,24 @@ class LLMRuntime:
         self._model, self._tok = load(model_path)
         self._generate = generate
 
-    def _gen_sync(self, messages: list[dict]) -> str:
+    def _gen_sync(self, messages: list[dict], prefix: str = "") -> str:
         prompt = self._tok.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=False
         )
-        return self._generate(
+        if prefix:
+            # "Put words in the model's mouth": the assistant turn starts with
+            # this text, so the continuation must extend it (e.g. JSON priming).
+            prompt = prompt + prefix
+        out = self._generate(
             self._model, self._tok, prompt=prompt,
             max_tokens=self.max_tokens, verbose=False,
         )
+        return prefix + out
 
-    def generate(self, messages: list[dict]) -> str:
+    def generate(self, messages: list[dict], prefix: str = "") -> str:
         """Chat-complete ``messages`` (system/user dicts) to text, serialised on
-        the shared Metal thread."""
-        return run_blocking(self._gen_sync, messages)
+        the shared Metal thread. ``prefix`` primes the assistant's reply."""
+        return run_blocking(self._gen_sync, messages, prefix)
 
 
 def get_llm(model_path: str | None = None, max_tokens: int = 256) -> LLMRuntime:

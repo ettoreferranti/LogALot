@@ -85,6 +85,19 @@ def validate_payload(payload: dict) -> bool:
     return set(payload).issubset(allowed)
 
 
+def _loads_lenient(s: str) -> dict | None:
+    """json.loads, but tolerant of the trailing commas small models love to emit
+    (``{"call":"X",}``)."""
+    try:
+        obj = json.loads(s)
+    except json.JSONDecodeError:
+        try:
+            obj = json.loads(re.sub(r",(\s*[}\]])", r"\1", s))
+        except json.JSONDecodeError:
+            return None
+    return obj if isinstance(obj, dict) else None
+
+
 def extract_json(text: str) -> dict | None:
     """Pull the first balanced ``{...}`` object out of model output and parse it.
 
@@ -99,36 +112,55 @@ def extract_json(text: str) -> dict | None:
                 start = i
             depth += 1
         elif ch == "}":
+            if depth == 0:
+                continue
             depth -= 1
             if depth == 0 and start != -1:
-                try:
-                    obj = json.loads(text[start : i + 1])
-                except json.JSONDecodeError:
-                    start = -1
-                    continue
-                return obj if isinstance(obj, dict) else None
+                obj = _loads_lenient(text[start : i + 1])
+                if obj is not None:
+                    return obj
+                start = -1
     return None
+
+
+# Prime the assistant reply with the start of the JSON object. The model can
+# only continue it, so it cannot wander into prose first — the single biggest
+# reliability win without a grammar engine (outlines_core has no py3.14 wheel).
+_JSON_PREFIX = '{"call":'
 
 
 class MLXParser:
     """In-process mlx-lm parser. The model loads lazily on the first
     :meth:`parse` call (multi-GB, multi-second the first time), then is cached
-    for the process lifetime by :mod:`logalot.mlx_runtime`."""
+    for the process lifetime by :mod:`logalot.mlx_runtime`.
 
-    def __init__(self, model_path: str = DEFAULT_PARSE_MODEL, max_tokens: int = 256) -> None:
+    ``runtime`` may be injected for testing; otherwise the cached MLX runtime for
+    ``model_path`` is used (so a live model swap is picked up)."""
+
+    def __init__(self, model_path: str = DEFAULT_PARSE_MODEL, max_tokens: int = 256,
+                 runtime=None) -> None:
         self.model_path = model_path
         self.max_tokens = max_tokens
+        self._runtime = runtime
+
+    def _runtime_for(self):
+        return self._runtime or get_llm(self.model_path, max_tokens=self.max_tokens)
 
     def parse(self, transcript: str) -> dict | None:
         """Transcript → validated QSO-field dict, or None if the model produced
         nothing schema-valid (caller leaves it for the human)."""
-        runtime = get_llm(self.model_path, max_tokens=self.max_tokens)
+        runtime = self._runtime_for()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": transcript},
         ]
-        text = runtime.generate(messages)
-        payload = extract_json(text)
+        payload = extract_json(runtime.generate(messages, prefix=_JSON_PREFIX))
+        if payload is None:
+            # Greedy decoding is deterministic, so a retry must change the input:
+            # add a blunt JSON-only reminder.
+            messages = messages + [{"role": "user", "content":
+                "Reply with ONLY one JSON object for the schema, nothing else."}]
+            payload = extract_json(runtime.generate(messages, prefix=_JSON_PREFIX))
         if payload is None or not validate_payload(payload):
             return None
         # Drop explicit nulls so downstream sees only present fields.

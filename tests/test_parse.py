@@ -1,7 +1,20 @@
 """Tests for the parse layer's MLX-independent logic: JSON extraction and schema
 validation. The mlx-lm generate path itself needs Apple-Silicon hardware + a
 downloaded model, so it is exercised manually, not in CI."""
-from logalot.parse import extract_json, validate_payload
+from logalot.parse import MLXParser, _JSON_PREFIX, extract_json, validate_payload
+
+
+class FakeRuntime:
+    """Stands in for an LLMRuntime: returns canned continuations, mimicking the
+    real generate() which prepends the priming prefix to its output."""
+
+    def __init__(self, continuations):
+        self.continuations = list(continuations)
+        self.prefixes = []
+
+    def generate(self, messages, prefix=""):
+        self.prefixes.append(prefix)
+        return prefix + self.continuations.pop(0)
 
 
 def test_extract_plain_json():
@@ -46,3 +59,28 @@ def test_validate_payload_call_must_be_str():
 
 def test_validate_payload_rejects_unknown_keys():
     assert not validate_payload({"call": "HB9IKS", "freq_mhz": "14"})
+
+
+def test_loads_lenient_via_extract_json_trailing_comma():
+    # Small models often emit a trailing comma; we should still parse.
+    assert extract_json('{"call": "DL1ABC", "name": "Tom",}') == {"call": "DL1ABC", "name": "Tom"}
+
+
+def test_parser_uses_json_priming_prefix():
+    rt = FakeRuntime([' "HB9IKS", "name": "Tom"}'])
+    out = MLXParser(runtime=rt).parse("hotel bravo nine india kilo sierra, name tom")
+    assert out == {"call": "HB9IKS", "name": "Tom"}
+    assert rt.prefixes == [_JSON_PREFIX]          # the assistant reply was primed
+
+
+def test_parser_retries_once_on_unparseable_output():
+    # First reply is prose-ish junk; the retry yields valid JSON.
+    rt = FakeRuntime([" sorry, I cannot help with that", ' "W1AW"}'])
+    out = MLXParser(runtime=rt).parse("whiskey one alpha whiskey")
+    assert out == {"call": "W1AW"}
+    assert len(rt.prefixes) == 2                   # primed both attempts
+
+
+def test_parser_returns_none_when_call_is_null():
+    rt = FakeRuntime([' null, "name": "Tom"}'])
+    assert MLXParser(runtime=rt).parse("just chatting, no call") is None
