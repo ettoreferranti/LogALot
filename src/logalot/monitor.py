@@ -88,7 +88,8 @@ def _snapshot(client: RigctldClient, audio: AudioCapture | None = None) -> dict:
 
 def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                audio_device: str | None = None, enable_audio: bool = True,
-               enable_asr: bool = True, enable_parse: bool = True) -> FastAPI:
+               enable_asr: bool = True, enable_parse: bool = True,
+               vad_threshold: float = -45.0) -> FastAPI:
     app = FastAPI(title="LogALot rig monitor")
     # One persistent CAT client for the app's lifetime; reconnects internally.
     client = RigctldClient(rig_host, rig_port)
@@ -121,7 +122,8 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                 parser = MLXParser()
             except ImportError:
                 print("parse: install the [parse] extra for the candidate panel")
-        feed = TranscriptFeed(audio, WhisperTranscriber(), cat=client, parser=parser)
+        feed = TranscriptFeed(audio, WhisperTranscriber(), cat=client, parser=parser,
+                              vad_threshold_dbfs=vad_threshold)
         feed.start()
         asr_status = "listening"
         print("asr: transcript feed started" + (" (+parse)" if parser else ""))

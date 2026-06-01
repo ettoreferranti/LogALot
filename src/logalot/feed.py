@@ -39,13 +39,18 @@ class TranscriptEntry:
 
 class TranscriptFeed:
     def __init__(self, audio, transcriber, cat=None, parser=None, history: int = 200,
-                 parse_debounce_s: float = 1.2, qso_idle_reset_s: float = 45.0) -> None:
+                 parse_debounce_s: float = 1.2, qso_idle_reset_s: float = 45.0,
+                 vad_threshold_dbfs: float = -45.0) -> None:
         self.audio = audio
         self.transcriber = transcriber
         self.cat = cat                 # PTT (skip TX) + CAT snapshot for candidates
         self.parser = parser           # None -> no candidate panel
         self.parse_debounce_s = parse_debounce_s
         self.qso_idle_reset_s = qso_idle_reset_s
+        # Speech gate: frames above this RMS count as voice. Raise it toward the
+        # band noise floor (watch the dashboard's Audio RX dBFS) so SSB hiss
+        # doesn't read as one endless utterance.
+        self.vad_threshold_dbfs = vad_threshold_dbfs
 
         self.entries: collections.deque[TranscriptEntry] = collections.deque(maxlen=history)
         self.last_candidate: dict | None = None
@@ -93,7 +98,7 @@ class TranscriptFeed:
 
     def _run(self) -> None:
         tap = self.audio.tap()
-        vad = EnergyVAD(self.audio.samplerate)
+        vad = EnergyVAD(self.audio.samplerate, threshold_dbfs=self.vad_threshold_dbfs)
         while not self._stop.is_set():
             try:
                 block = tap.get(timeout=0.2)
