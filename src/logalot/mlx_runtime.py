@@ -117,7 +117,12 @@ class LLMRuntime:
             ) from e
         self.model_path = model_path
         self.max_tokens = max_tokens
+        # Visible confirmation of which model is actually in memory (a dropdown
+        # swap loads here on the next parse; first use of an uncached model
+        # downloads, otherwise it's read from the HF cache).
+        print(f"parse: loading {model_path} …", flush=True)
         self._model, self._tok = load(model_path)
+        print(f"parse: loaded {model_path}", flush=True)
         self._generate = generate
 
     def _gen_sync(self, messages: list[dict], prefix: str = "") -> str:

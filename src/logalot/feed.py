@@ -121,8 +121,10 @@ class TranscriptFeed:
         self.transcriber.translate = bool(on)
 
     def set_parse_model(self, model_path: str) -> None:
-        if self.parser is not None and model_path:
+        if self.parser is not None and model_path and \
+                model_path != getattr(self.parser, "model_path", None):
             self.parser.model_path = model_path   # loads lazily on next parse
+            print(f"parse: model set to {model_path} (loads on next parse)", flush=True)
 
     # --- lifecycle ------------------------------------------------------------
 

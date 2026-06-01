@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="drop transcripts below this mean token logprob (default -1.0)")
     m.add_argument("--language", default="auto",
                    help="ASR language code, or 'auto' to detect (default auto); tunable live")
+    m.add_argument("--offline", action="store_true",
+                   help="use only cached models; skip all HuggingFace network checks")
     m.add_argument("--translate", action="store_true",
                    help="translate non-English speech to English (default off); tunable live")
     m.add_argument("--list-audio", action="store_true",
@@ -162,6 +164,13 @@ def _run_monitor(args) -> int:
         for d in list_input_devices():
             print(f"  [{d.index}] {d.name}  ({d.channels} ch, {int(d.samplerate)} Hz)")
         return 0
+
+    if args.offline:
+        # Cache-only: huggingface_hub won't hit the network at all (no per-launch
+        # metadata checks, fully local). An uncached model then errors clearly.
+        import os
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        print("offline: using cached models only (no HuggingFace network access)")
 
     try:
         import uvicorn
