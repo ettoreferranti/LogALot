@@ -22,7 +22,8 @@ from dataclasses import dataclass
 
 from .asr import EnergyVAD, resample_to_16k
 from .capture import utc_now_adif
-from .validate import NON_CALLSIGNS, confidence_flag, normalise_call
+from .dxcc import country_for_call
+from .validate import NON_CALLSIGNS, is_q_code, looks_like_callsign, normalise_call
 
 # Optional LLM-extracted fields we carry from the parser onto the candidate.
 _LLM_FIELDS = ("name", "qth", "rst_sent", "rst_rcvd", "gridsquare", "comment")
@@ -233,12 +234,20 @@ class TranscriptFeed:
         if raw_call:
             core, affixes = normalise_call(raw_call)
             call = core or raw_call
-            # Backstop the prompt: never surface a CQ/Q-code as the worked call.
-            if call.upper() not in NON_CALLSIGNS:
-                cand["call"] = call
-                cand["call_confidence"] = confidence_flag(call)
+            if looks_like_callsign(call):
+                # A complete, valid callsign: this is the call field.
+                cand["call"] = call.upper()
+                cand["call_confidence"] = "ok"
+                country = country_for_call(call)
+                if country:
+                    cand["call_country"] = country
                 if affixes:
                     cand["affixes"] = affixes
+            elif call.upper() not in NON_CALLSIGNS and not is_q_code(call):
+                # Call-like but not a complete valid call (e.g. a partial "G4").
+                # Show it as tentative, separate from the trusted call field, so a
+                # half-heard fragment never masquerades as the logged callsign.
+                cand["call_tentative"] = call.upper()
         for k in _LLM_FIELDS:
             if fields.get(k):
                 cand[k] = fields[k]

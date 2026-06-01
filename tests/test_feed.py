@@ -246,6 +246,55 @@ def test_recent_text_caps_to_recent_window():
     assert len(text) <= 60
 
 
+def _get_candidate(sub, timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            msg = sub.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if isinstance(msg, dict) and msg.get("kind") == "candidate":
+            return msg
+    return None
+
+
+def test_feed_candidate_adds_country_for_valid_call():
+    audio = FakeAudio()
+    parser = StubParser({"call": "HB9IKS"})
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
+                          parser=parser, parse_debounce_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        cand = _get_candidate(sub)
+    finally:
+        feed.stop()
+    assert cand is not None
+    assert cand["call"] == "HB9IKS"
+    assert cand["call_confidence"] == "ok"
+    assert cand["call_country"] == "Switzerland"
+
+
+def test_feed_demotes_partial_call_to_tentative():
+    # "G4" (prefix+digit, no suffix) must NOT populate the trusted call field.
+    audio = FakeAudio()
+    parser = StubParser({"call": "G4", "qth": "London"})
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
+                          parser=parser, parse_debounce_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        cand = _get_candidate(sub)
+    finally:
+        feed.stop()
+    assert cand is not None
+    assert "call" not in cand
+    assert cand.get("call_tentative") == "G4"
+    assert cand.get("qth") == "London"
+
+
 def test_feed_drops_cq_and_qcodes_from_candidate():
     audio = FakeAudio()
     parser = StubParser({"call": "CQDX", "qth": "Bern"})

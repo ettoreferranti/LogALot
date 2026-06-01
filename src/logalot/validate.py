@@ -12,6 +12,11 @@ import re
 # 1-4 letter suffix. Matches HB9IKS, W1AW, 4X4AA, 2E0ABC; rejects bare words.
 _CALL_RE = re.compile(r"^[A-Z0-9]{1,3}[0-9][A-Z]{1,4}$")
 
+# Every Q-code is the letter Q followed by two letters (QTH, QSL, QRZ, …). One
+# rule covers all of them — no list to maintain — so the parser can never log a
+# Q-code as a callsign.
+_Q_CODE_RE = re.compile(r"^Q[A-Z]{2}$")
+
 # Affixes carrying no call identity; stripped before validation, kept as context.
 _KNOWN_SUFFIXES = {"P", "M", "MM", "AM", "QRP", "A"}
 
@@ -24,10 +29,16 @@ NON_CALLSIGNS = {
 }
 
 
+def is_q_code(token: str) -> bool:
+    return bool(_Q_CODE_RE.match(token.upper().strip()))
+
+
 def looks_like_callsign(call: str) -> bool:
-    """A worked-station call worth showing: not a CQ/Q-code, and call-shaped."""
+    """A complete, worked-station call worth putting in the candidate's call field:
+    a full callsign (prefix+digit+suffix), not a Q-code, CQ, or other indicator.
+    Partials like 'G4' (no suffix) fail this."""
     c = call.upper().strip()
-    return c not in NON_CALLSIGNS and is_valid_call(c)
+    return c not in NON_CALLSIGNS and not is_q_code(c) and is_valid_call(c)
 
 NATO = {
     "alpha": "A", "alfa": "A", "bravo": "B", "charlie": "C", "delta": "D",

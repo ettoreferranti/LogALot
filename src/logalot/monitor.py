@@ -453,8 +453,12 @@ function renderCandidate(d){
   const rows = [];
   if (d.call){
     const aff = d.affixes ? ' <span class="muted">/'+esc(d.affixes.join('/'))+'</span>' : '';
+    const ctry = d.call_country ? ' <span class="muted">· '+esc(d.call_country)+'</span>' : '';
     rows.push('<div class="ck">call</div><div class="cv call '+(d.call_confidence||'')+'">'+
-              esc(d.call)+aff+'</div>');
+              esc(d.call)+aff+ctry+'</div>');
+  } else if (d.call_tentative){
+    rows.push('<div class="ck">call?</div><div class="cv muted">'+esc(d.call_tentative)+
+              ' <span class="badge">unconfirmed</span></div>');
   }
   for (const k in CAND_FIELDS) if (d[k])
     rows.push('<div class="ck">'+CAND_FIELDS[k]+'</div><div class="cv">'+esc(d[k])+'</div>');

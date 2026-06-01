@@ -1,6 +1,7 @@
 from logalot.validate import (
     confidence_flag,
     expand_phonetics,
+    is_q_code,
     is_valid_call,
     looks_like_callsign,
     normalise_call,
@@ -42,8 +43,22 @@ def test_confidence_flag():
     assert confidence_flag("not-a-call") == "review"
 
 
+def test_is_q_code_rule_covers_all():
+    for q in ["QTH", "QSL", "QRZ", "QRM", "QSY", "QSB", "QRP"]:
+        assert is_q_code(q), q
+    assert not is_q_code("HB9IKS")
+    assert not is_q_code("QQ")          # too short
+
+
 def test_looks_like_callsign_rejects_cq_and_qcodes():
     assert looks_like_callsign("HB9IKS")
     assert looks_like_callsign("w1aw")
     for junk in ["CQ", "CQDX", "QRZ", "DX", "QTH", "73"]:
         assert not looks_like_callsign(junk), junk
+
+
+def test_looks_like_callsign_rejects_partials():
+    # A bare prefix+digit with no suffix is not a complete callsign.
+    assert not looks_like_callsign("G4")
+    assert not looks_like_callsign("EA")
+    assert looks_like_callsign("G4WGU")
