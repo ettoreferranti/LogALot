@@ -15,11 +15,9 @@ Two jobs, kept separate:
    status line — so we can read deterministically and surface rig errors instead
    of silently parsing a truncated reply.
 
-2. **Audio**: pull the FTDX10 USB CODEC RX stream into a ring buffer for the ASR
-   module. Needs ``sounddevice`` (PortAudio), so it lives behind the ``[capture]``
-   extra and is imported lazily — importing this module must never require it.
-
-Interfaces are defined so ``asr`` and the daemon can be built against them.
+2. **Audio**: pulling the FTDX10 USB CODEC RX stream into a ring buffer lives in
+   :mod:`logalot.audio` (it needs the ``[capture]`` extra). Kept in a separate
+   module so this CAT half stays stdlib-only and always importable.
 """
 from __future__ import annotations
 
@@ -79,11 +77,6 @@ class RigState:
 
 class CatClient(Protocol):
     def state(self) -> RigState: ...
-
-
-class AudioSource(Protocol):
-    def read(self, seconds: float) -> "object":  # numpy.ndarray at runtime
-        ...
 
 
 class CatError(RuntimeError):
@@ -262,17 +255,3 @@ class RigctldClient:
         except CatError:
             pass
         return st
-
-
-class SounddeviceSource:
-    """RX audio from the rig's USB CODEC. TODO(M1 audio).
-
-    ``sounddevice`` is imported lazily inside :meth:`read` so this module stays
-    importable (and the CAT client usable) without the ``[capture]`` extra."""
-
-    def __init__(self, device_name: str = "FTDX10", samplerate: int = 16000) -> None:
-        self.device_name = device_name
-        self.samplerate = samplerate
-
-    def read(self, seconds: float):
-        raise NotImplementedError("M1 audio: capture from PortAudio device into buffer")

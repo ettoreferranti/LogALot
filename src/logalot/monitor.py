@@ -16,6 +16,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .audio import AudioCapture, AudioError, dbfs_to_pct
 from .capture import CatError, RigctldClient
 
 
@@ -37,16 +38,31 @@ def smeter_pct(dbs9: int | None) -> int:
     return int(max(0, min(100, (dbs9 - lo) / (hi - lo) * 100)))
 
 
-def _snapshot(client: RigctldClient) -> dict:
+def _audio_block(audio: AudioCapture | None) -> dict:
+    """Audio half of the snapshot. Absent/failed capture is reported as off,
+    never raised."""
+    if audio is None or not audio.is_running():
+        return {"audio_on": False, "audio_device": "—"}
+    db = audio.level_dbfs()
+    return {
+        "audio_on": True,
+        "audio_device": audio.device_label,
+        "level_dbfs": round(db, 1),
+        "level_pct": dbfs_to_pct(db),
+    }
+
+
+def _snapshot(client: RigctldClient, audio: AudioCapture | None = None) -> dict:
     """One poll, as a JSON-able dict. CAT failure is reported, never raised —
     the dashboard shows 'rig offline' rather than 500-ing."""
     import datetime as dt
 
     utc = dt.datetime.now(dt.timezone.utc).strftime("%H:%M:%S")
+    audio_block = _audio_block(audio)
     try:
         st = client.monitor()
     except CatError as e:
-        return {"ok": False, "error": str(e), "utc": utc}
+        return {"ok": False, "error": str(e), "utc": utc, **audio_block}
     return {
         "ok": True,
         "utc": utc,
@@ -59,21 +75,40 @@ def _snapshot(client: RigctldClient) -> dict:
         "smeter_label": smeter_label(st.strength_dbs9),
         "smeter_pct": smeter_pct(st.strength_dbs9),
         "ptt": bool(st.ptt),
+        **audio_block,
     }
 
 
-def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532) -> FastAPI:
+def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
+               audio_device: str | None = None, enable_audio: bool = True) -> FastAPI:
     app = FastAPI(title="LogALot rig monitor")
     # One persistent CAT client for the app's lifetime; reconnects internally.
     client = RigctldClient(rig_host, rig_port)
 
+    # Best-effort audio capture: if the device or [capture] extra is missing the
+    # dashboard simply shows 'audio off' — it never blocks the rig view.
+    audio: AudioCapture | None = None
+    if enable_audio:
+        audio = AudioCapture(audio_device)
+        try:
+            audio.start()
+            print(f"audio: capturing from {audio.device_label!r} @ {audio.samplerate} Hz")
+        except AudioError as e:
+            print(f"audio: off ({e})")
+            audio = None
+
     @app.get("/api/state")
     def state() -> JSONResponse:
-        return JSONResponse(_snapshot(client))
+        return JSONResponse(_snapshot(client, audio))
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
         return _PAGE
+
+    @app.on_event("shutdown")
+    def _shutdown() -> None:
+        if audio is not None:
+            audio.stop()
 
     return app
 
@@ -105,6 +140,7 @@ _PAGE = """<!doctype html>
   .bar { height:14px; background:#21262d; border-radius:8px; overflow:hidden; border:1px solid #30363d; }
   .fill { height:100%; width:0; background:linear-gradient(90deg,#2ea043,#d29922 70%,#f85149);
           transition:width .25s ease; }
+  .afill { background:linear-gradient(90deg,#1f6feb,#2ea043 60%,#d29922); transition:width .08s linear; }
   .ptt { display:flex; align-items:center; gap:10px; margin-top:22px; }
   .lamp { width:14px; height:14px; border-radius:50%; background:#2ea043; box-shadow:0 0 10px #2ea04388; }
   .lamp.tx { background:#f85149; box-shadow:0 0 12px #f85149aa; }
@@ -125,6 +161,10 @@ _PAGE = """<!doctype html>
       <div class="lbl"><span>S-meter</span><span id="smeter">—</span></div>
       <div class="bar"><div class="fill" id="fill"></div></div>
     </div>
+    <div class="meter">
+      <div class="lbl"><span>Audio RX <span class="muted" id="adev"></span></span><span id="alevel">—</span></div>
+      <div class="bar"><div class="fill afill" id="afill"></div></div>
+    </div>
     <div class="ptt"><span class="lamp" id="lamp"></span><span class="txt" id="pttxt">—</span>
       <span class="muted" id="status" style="margin-left:auto"></span></div>
   </div>
@@ -135,6 +175,15 @@ async function tick() {
     const r = await fetch('/api/state', {cache:'no-store'});
     const d = await r.json();
     $('clock').textContent = d.utc + ' UTC';
+    // Audio is independent of CAT — render it whether or not the rig answers.
+    if (d.audio_on) {
+      $('adev').textContent = '· ' + d.audio_device;
+      $('alevel').textContent = d.level_dbfs + ' dBFS';
+      $('afill').style.width = d.level_pct + '%';
+    } else {
+      $('adev').textContent = '· off'; $('alevel').textContent = '—';
+      $('afill').style.width = '0%';
+    }
     if (!d.ok) {
       $('status').innerHTML = '<span class="offline">rig offline</span>';
       $('freq').innerHTML = '—<small> MHz</small>';

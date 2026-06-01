@@ -26,6 +26,11 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--rig-port", type=int, default=4532, help="rigctld port")
     m.add_argument("--host", default="127.0.0.1", help="web bind host")
     m.add_argument("--port", type=int, default=8765, help="web bind port")
+    m.add_argument("--audio-device", default=None,
+                   help="input device name substring (default: USB Audio CODEC)")
+    m.add_argument("--no-audio", action="store_true", help="disable audio capture")
+    m.add_argument("--list-audio", action="store_true",
+                   help="list input devices and exit")
 
     args = p.parse_args(argv)
 
@@ -53,6 +58,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_monitor(args) -> int:
+    if args.list_audio:
+        try:
+            from .audio import list_input_devices
+        except ModuleNotFoundError:
+            print("audio needs the [capture] extra: pip install -e '.[capture]'")
+            return 1
+        for d in list_input_devices():
+            print(f"  [{d.index}] {d.name}  ({d.channels} ch, {int(d.samplerate)} Hz)")
+        return 0
+
     try:
         import uvicorn
     except ModuleNotFoundError:
@@ -60,7 +75,8 @@ def _run_monitor(args) -> int:
         return 1
     from .monitor import create_app
 
-    app = create_app(args.rig_host, args.rig_port)
+    app = create_app(args.rig_host, args.rig_port,
+                     audio_device=args.audio_device, enable_audio=not args.no_audio)
     print(f"rig monitor on http://{args.host}:{args.port}  (rigctld {args.rig_host}:{args.rig_port})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
