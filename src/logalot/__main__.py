@@ -34,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
     m = sub.add_parser("monitor", help="live rig dashboard (needs [ui] extra + rigctld)")
     m.add_argument("--rig-host", default="127.0.0.1", help="rigctld host")
     m.add_argument("--rig-port", type=int, default=4532, help="rigctld port")
+    m.add_argument("--auto-cat", action="store_true",
+                   help="auto-detect the CAT port and launch rigctld in-process (one terminal)")
+    m.add_argument("--cat-model", default="1042", help="rig model for --auto-cat (default 1042=FTDX10)")
+    m.add_argument("--cat-baud", type=int, default=38400, help="CAT baud for --auto-cat (default 38400)")
     m.add_argument("--host", default="127.0.0.1", help="web bind host")
     m.add_argument("--port", type=int, default=8765, help="web bind port")
     m.add_argument("--audio-device", default=None,
@@ -166,14 +170,65 @@ def _run_monitor(args) -> int:
         return 1
     from .monitor import create_app
 
-    app = create_app(args.rig_host, args.rig_port,
-                     audio_device=args.audio_device, enable_audio=not args.no_audio,
-                     enable_asr=not args.no_asr, enable_parse=not args.no_parse,
-                     vad_threshold=args.vad_threshold, min_logprob=args.min_logprob,
-                     language=args.language, translate=args.translate)
-    print(f"rig monitor on http://{args.host}:{args.port}  (rigctld {args.rig_host}:{args.rig_port})")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    rigctld_procs: list = []
+    if args.auto_cat:
+        import signal
+
+        # Handle interrupts before we spawn rigctld, and reap it in the finally
+        # below, so --auto-cat never orphans rigctld on the serial port.
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+
+    try:
+        if args.auto_cat:
+            _autostart_rigctld(args, rigctld_procs)
+        app = create_app(args.rig_host, args.rig_port,
+                         audio_device=args.audio_device, enable_audio=not args.no_audio,
+                         enable_asr=not args.no_asr, enable_parse=not args.no_parse,
+                         vad_threshold=args.vad_threshold, min_logprob=args.min_logprob,
+                         language=args.language, translate=args.translate)
+        print(f"rig monitor on http://{args.host}:{args.port}  (rigctld {args.rig_host}:{args.rig_port})")
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if rigctld_procs:
+            from .cat import stop_rigctld
+            for p in rigctld_procs:
+                stop_rigctld(p)
     return 0
+
+
+def _autostart_rigctld(args, holder: list) -> None:
+    """Probe for the CAT port and launch rigctld in-process (--auto-cat). On
+    success ``holder`` ends with the running proc; if nothing answers we warn and
+    continue — the dashboard still runs (audio/transcript), CAT just shows offline."""
+    from .cat import (
+        candidate_devices,
+        port_in_use,
+        probe_device,
+        rigctld_path,
+    )
+
+    if rigctld_path() is None:
+        print("auto-cat: rigctld not found (brew install hamlib) — continuing without CAT")
+        return
+    if port_in_use(args.rig_port):
+        print(f"auto-cat: something already on :{args.rig_port} — using it")
+        return
+    devices = candidate_devices()
+    if not devices:
+        print("auto-cat: no USB-serial devices found — continuing without CAT")
+        return
+    print(f"auto-cat: probing {len(devices)} device(s) for a model-{args.cat_model} rig…")
+    for dev in devices:
+        proc, freq = probe_device(dev, args.cat_model, args.cat_baud, args.rig_port,
+                                  on_spawn=holder.append)
+        if freq is not None:
+            print(f"auto-cat: CAT on {dev} ({freq:.6f} MHz); rigctld on :{args.rig_port}")
+            return
+        holder.clear()        # failed proc already reaped by probe_device
+    print("auto-cat: no CAT device answered — continuing without CAT")
 
 
 if __name__ == "__main__":
