@@ -21,6 +21,16 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("out", help="output .adi path")
     sub.add_parser("count", help="print number of canonical QSOs")
 
+    cp = sub.add_parser("cat-probe",
+                        help="auto-detect the rig CAT serial port and launch rigctld")
+    cp.add_argument("--model", default="1042", help="Hamlib rig model id (default 1042 = FTDX10)")
+    cp.add_argument("--baud", type=int, default=38400, help="CAT baud (default 38400)")
+    cp.add_argument("--rig-port", type=int, default=4532, help="rigctld TCP port (default 4532)")
+    cp.add_argument("--no-launch", action="store_true",
+                    help="just find the device and print the rigctld command, don't run it")
+    cp.add_argument("--device", action="append",
+                    help="probe only this device path (repeatable); default: scan USB-serial")
+
     m = sub.add_parser("monitor", help="live rig dashboard (needs [ui] extra + rigctld)")
     m.add_argument("--rig-host", default="127.0.0.1", help="rigctld host")
     m.add_argument("--rig-port", type=int, default=4532, help="rigctld port")
@@ -51,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     # dependency-free).
     if args.cmd == "monitor":
         return _run_monitor(args)
+    if args.cmd == "cat-probe":
+        return _run_cat_probe(args)
 
     store = Store(args.db)
 
@@ -67,6 +79,73 @@ def main(argv: list[str] | None = None) -> int:
         print(len(store.all_qso()))
         return 0
     return 2
+
+
+def _raise_keyboard_interrupt(*_args) -> None:
+    raise KeyboardInterrupt
+
+
+def _run_cat_probe(args) -> int:
+    import signal
+
+    from .cat import (
+        candidate_devices,
+        port_in_use,
+        probe_device,
+        rigctld_command,
+        rigctld_path,
+        stop_rigctld,
+    )
+
+    if rigctld_path() is None:
+        print("rigctld not found — install Hamlib (brew install hamlib)")
+        return 1
+    if port_in_use(args.rig_port):
+        print(f"something is already listening on :{args.rig_port} "
+              f"(rigctld already running?). Stop it, or pass --rig-port.")
+        return 1
+
+    devices = args.device or candidate_devices()
+    if not devices:
+        print("no USB-serial devices found — is the rig plugged in and powered on?")
+        return 1
+
+    # Install interrupt handling BEFORE we spawn anything, and track the live
+    # rigctld, so a Ctrl+C/SIGTERM at any point reaps it (no orphan on the port).
+    # default_int_handler re-honours SIGINT even if it was inherited as ignored.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    live: list[object] = []   # at most one: the rigctld currently spawned
+
+    print(f"probing {len(devices)} device(s) for a model-{args.model} rig @ {args.baud} baud…")
+    try:
+        for dev in devices:
+            print(f"  {dev} … ", end="", flush=True)
+            proc, freq = probe_device(dev, args.model, args.baud, args.rig_port,
+                                      on_spawn=lambda p: live.append(p))
+            if freq is None:
+                live.clear()        # probe_device already reaped a failed proc
+                print("no CAT response")
+                continue
+            print(f"CAT OK — {freq:.6f} MHz")
+            print(f"\n{rigctld_command(dev, args.model, args.baud, args.rig_port)}")
+            if args.no_launch:
+                stop_rigctld(proc)
+                return 0
+            print(f"rigctld running on :{args.rig_port}. Leave this open; "
+                  f"run 'logalot monitor' elsewhere. Ctrl+C to stop.")
+            proc.wait()
+            return 0
+    except KeyboardInterrupt:
+        print("\nstopping rigctld…")
+    finally:
+        for p in live:
+            stop_rigctld(p)
+
+    if not live:
+        print("\nno CAT device answered. Check: rig on, CAT enabled in the menu, "
+              "and the baud matches the rig's CAT RATE (try --baud 4800/9600/19200).")
+    return 1
 
 
 def _run_monitor(args) -> int:
