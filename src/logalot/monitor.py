@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .audio import AudioCapture, AudioError, dbfs_to_pct
 from .capture import CatError, RigctldClient
-from .feed import TranscriptFeed
+from .feed import TranscriptEntry, TranscriptFeed
 from .mlx_runtime import is_available
 
 
@@ -88,7 +88,7 @@ def _snapshot(client: RigctldClient, audio: AudioCapture | None = None) -> dict:
 
 def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                audio_device: str | None = None, enable_audio: bool = True,
-               enable_asr: bool = True) -> FastAPI:
+               enable_asr: bool = True, enable_parse: bool = True) -> FastAPI:
     app = FastAPI(title="LogALot rig monitor")
     # One persistent CAT client for the app's lifetime; reconnects internally.
     client = RigctldClient(rig_host, rig_port)
@@ -112,10 +112,19 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
     if enable_asr and audio is not None and is_available():
         from .asr import WhisperTranscriber
 
-        feed = TranscriptFeed(audio, WhisperTranscriber(), cat=client)
+        parser = None
+        if enable_parse:
+            try:
+                import mlx_lm  # noqa: F401
+
+                from .parse import MLXParser
+                parser = MLXParser()
+            except ImportError:
+                print("parse: install the [parse] extra for the candidate panel")
+        feed = TranscriptFeed(audio, WhisperTranscriber(), cat=client, parser=parser)
         feed.start()
         asr_status = "listening"
-        print("asr: transcript feed started")
+        print("asr: transcript feed started" + (" (+parse)" if parser else ""))
     elif enable_asr and audio is not None:
         asr_status = "ASR unavailable — install the [asr] extra (Apple Silicon)"
         print(f"asr: {asr_status}")
@@ -149,9 +158,17 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _event(msg) -> str:
+    """Wrap a feed message as an SSE 'data:' line. Transcript entries get a kind
+    tag; candidate dicts already carry one."""
+    if isinstance(msg, TranscriptEntry):
+        return _sse({"kind": "transcript", **asdict(msg)})
+    return _sse(msg)
+
+
 async def _transcript_events(request: Request, feed: TranscriptFeed | None, asr_status: str):
-    """SSE generator: replay recent history, then push new entries as they land.
-    Sends keepalive comments so a disconnect is noticed promptly."""
+    """SSE generator: replay recent history (transcript + last candidate), then
+    push new messages as they land. Keepalive comments so a disconnect is noticed."""
     if feed is None:
         yield _sse({"info": asr_status})
         return
@@ -159,16 +176,18 @@ async def _transcript_events(request: Request, feed: TranscriptFeed | None, asr_
     loop = asyncio.get_event_loop()
     try:
         for e in list(feed.entries):
-            yield _sse(asdict(e))
+            yield _event(e)
+        if feed.last_candidate is not None:
+            yield _event(feed.last_candidate)
         while True:
             if await request.is_disconnected():
                 break
             try:
-                entry = await loop.run_in_executor(None, lambda: q.get(timeout=1.0))
+                msg = await loop.run_in_executor(None, lambda: q.get(timeout=1.0))
             except queue.Empty:
                 yield ": keepalive\n\n"
                 continue
-            yield _sse(asdict(entry))
+            yield _event(msg)
     finally:
         feed.unsubscribe(q)
 
@@ -216,6 +235,14 @@ _PAGE = """<!doctype html>
   .rtext { color:#e6edf3; word-break:break-word; }
   .rmeta { color:#6e7681; font-size:11px; white-space:nowrap; }
   .txlog .empty { color:#6e7681; }
+  .cand { margin-top:20px; border-top:1px solid #30363d; padding-top:16px; }
+  .candbody { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; font-size:14px; align-items:baseline; }
+  .ck { color:#7d8590; text-transform:uppercase; font-size:11px; letter-spacing:.06em; }
+  .cv { color:#e6edf3; word-break:break-word; }
+  .cv.call { font-weight:700; font-size:20px; font-variant-numeric:tabular-nums; }
+  .cv.call.ok { color:#2ea043; } .cv.call.review { color:#d29922; }
+  .badge { font-size:10px; border:1px solid #30363d; border-radius:999px; padding:1px 7px;
+           color:#7d8590; vertical-align:middle; margin-left:8px; }
 </style></head>
 <body>
   <div class="panel">
@@ -239,6 +266,10 @@ _PAGE = """<!doctype html>
     <div class="tx">
       <div class="txhead"><span>Transcript · remote operator (RX)</span><span id="asr">—</span></div>
       <div class="txlog" id="txlog"><span class="empty">waiting for speech…</span></div>
+    </div>
+    <div class="cand" id="cand" hidden>
+      <div class="txhead"><span>Candidate QSO<span class="badge">advisory · not logged</span></span></div>
+      <div class="candbody" id="candbody"></div>
     </div>
   </div>
 <script>
@@ -281,8 +312,10 @@ function esc(s){ const d=document.createElement('div'); d.textContent=s; return 
 const es = new EventSource('/api/transcript');
 es.onmessage = (ev) => {
   const d = JSON.parse(ev.data);
+  if (d.info !== undefined) { document.getElementById('asr').textContent = d.info; return; }
+  if (d.kind === 'candidate') { renderCandidate(d); return; }
+  // transcript line
   const asr = document.getElementById('asr'), log = document.getElementById('txlog');
-  if (d.info !== undefined) { asr.textContent = d.info; return; }
   asr.textContent = 'listening';
   const empty = log.querySelector('.empty'); if (empty) empty.remove();
   const conf = (d.avg_logprob != null) ? ' · lp ' + d.avg_logprob.toFixed(2) : '';
@@ -293,6 +326,29 @@ es.onmessage = (ev) => {
   log.scrollTop = log.scrollHeight;
 };
 es.onerror = () => { document.getElementById('asr').textContent = 'reconnecting…'; };
+
+const CAND_FIELDS = {name:'name', qth:'qth', rst_sent:'rst s', rst_rcvd:'rst r',
+                     gridsquare:'grid', comment:'cmt'};
+function renderCandidate(d){
+  const panel = document.getElementById('cand'), body = document.getElementById('candbody');
+  const rows = [];
+  if (d.call){
+    const aff = d.affixes ? ' <span class="muted">/'+esc(d.affixes.join('/'))+'</span>' : '';
+    rows.push('<div class="ck">call</div><div class="cv call '+(d.call_confidence||'')+'">'+
+              esc(d.call)+aff+'</div>');
+  }
+  for (const k in CAND_FIELDS) if (d[k])
+    rows.push('<div class="ck">'+CAND_FIELDS[k]+'</div><div class="cv">'+esc(d[k])+'</div>');
+  const rig = [];
+  if (d.freq_mhz != null) rig.push(d.freq_mhz.toFixed(3)+' MHz');
+  if (d.band) rig.push(d.band);
+  if (d.mode) rig.push(d.mode);
+  if (rig.length) rows.push('<div class="ck">rig</div><div class="cv muted">'+esc(rig.join(' · '))+
+                            ' · '+d.qso_date+' '+d.time_on+' UTC</div>');
+  if (d.source_text) rows.push('<div class="ck">heard</div><div class="cv muted">'+esc(d.source_text)+'</div>');
+  body.innerHTML = rows.join('');
+  panel.hidden = false;
+}
 </script>
 </body></html>
 """

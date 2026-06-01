@@ -1,12 +1,14 @@
 """End-to-end test of the transcript feed with a stub transcriber and fake audio
 source — exercises the audio→VAD→ASR→publish path with no MLX/whisper."""
 import queue
+import time
 
 import pytest
 
 np = pytest.importorskip("numpy")
 
 from logalot.asr import Segment  # noqa: E402
+from logalot.capture import RigState  # noqa: E402
 from logalot.feed import TranscriptFeed  # noqa: E402
 
 
@@ -41,6 +43,23 @@ class StubCat:
 
     def ptt(self):
         return self._ptt
+
+
+class StubParser:
+    def __init__(self, fields):
+        self.fields = fields
+        self.calls = 0
+
+    def parse(self, text):
+        self.calls += 1
+        return dict(self.fields)
+
+
+class StubCatFull(StubCat):
+    """CAT stub that also answers state() for candidate building."""
+
+    def state(self):
+        return RigState(freq_mhz=14.074, mode="SSB", band="20m", raw_mode="USB")
 
 
 def _utterance(sr=16000):
@@ -82,3 +101,53 @@ def test_feed_skips_segments_while_transmitting():
     finally:
         feed.stop()
     assert tr.calls == 0
+
+
+def test_feed_builds_advisory_candidate():
+    audio = FakeAudio()
+    tr = StubTranscriber("hotel bravo nine india kilo sierra")
+    parser = StubParser({"call": "HB9IKS", "name": "Tom", "rst_rcvd": "59"})
+    feed = TranscriptFeed(audio, tr, cat=StubCatFull(ptt=False), parser=parser,
+                          parse_debounce_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        cand = None
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            msg = sub.get(timeout=5)
+            if isinstance(msg, dict) and msg.get("kind") == "candidate":
+                cand = msg
+                break
+    finally:
+        feed.stop()
+    assert cand is not None
+    assert cand["call"] == "HB9IKS"
+    assert cand["call_confidence"] == "ok"
+    assert cand["name"] == "Tom"
+    # CAT is authoritative for these — they come from state(), not the LLM.
+    assert cand["mode"] == "SSB"
+    assert cand["band"] == "20m"
+    assert cand["freq_mhz"] == 14.074
+    assert "qso_date" in cand and "time_on" in cand
+    assert parser.calls >= 1
+
+
+def test_feed_no_parser_means_no_candidate():
+    audio = FakeAudio()
+    feed = TranscriptFeed(audio, StubTranscriber(), parser=None)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        # Only transcript entries should ever arrive, never a candidate dict.
+        for _ in range(2):
+            try:
+                msg = sub.get(timeout=1.5)
+            except queue.Empty:
+                break
+            assert not (isinstance(msg, dict) and msg.get("kind") == "candidate")
+    finally:
+        feed.stop()
+    assert feed.last_candidate is None

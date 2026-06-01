@@ -29,18 +29,20 @@ def test_extract_none_when_no_json():
 
 
 def test_validate_payload_ok():
-    assert validate_payload({"call": "HB9IKS", "mode": "SSB"})
-    assert validate_payload({"call": "HB9IKS", "mode": "SSB", "name": "Tom", "rst_sent": "59"})
+    assert validate_payload({"call": "HB9IKS"})
+    assert validate_payload({"call": "HB9IKS", "name": "Tom", "rst_sent": "59"})
 
 
-def test_validate_payload_missing_required():
-    assert not validate_payload({"call": "HB9IKS"})        # no mode
+def test_validate_payload_callsign_is_the_only_requirement():
+    # mode/freq/band/time come from CAT, not the LLM — a bare call is valid,
+    # but a payload without a call is not.
+    assert validate_payload({"call": "HB9IKS"})
     assert not validate_payload({"mode": "SSB"})           # no call
 
 
-def test_validate_payload_required_must_be_str():
-    assert not validate_payload({"call": None, "mode": "SSB"})
+def test_validate_payload_call_must_be_str():
+    assert not validate_payload({"call": None})
 
 
 def test_validate_payload_rejects_unknown_keys():
-    assert not validate_payload({"call": "HB9IKS", "mode": "SSB", "freq_mhz": "14"})
+    assert not validate_payload({"call": "HB9IKS", "freq_mhz": "14"})

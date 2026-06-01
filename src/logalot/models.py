@@ -62,15 +62,17 @@ class QSO:
 
 
 # JSON schema the local LLM (parse module) must emit. Kept here so model and
-# parser cannot drift. Numbers the rig can supply (freq/band/time) are NOT asked
-# of the LLM — they come from CAT.
+# parser cannot drift. Anything the rig can supply (freq/band/mode/time) is NOT
+# required of the LLM — those come from CAT at candidate-build time. Only the
+# callsign is required; the LLM may volunteer a heard mode but it is advisory and
+# CAT overrides it.
 QSO_LLM_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["call", "mode"],
+    "required": ["call"],
     "properties": {
         "call": {"type": "string", "description": "Worked station callsign, normalised, no phonetics"},
-        "mode": {"type": "string", "description": "e.g. SSB, CW, FT8, FM"},
+        "mode": {"type": ["string", "null"], "description": "only if explicitly spoken; CAT is authoritative"},
         "rst_sent": {"type": ["string", "null"]},
         "rst_rcvd": {"type": ["string", "null"]},
         "name": {"type": ["string", "null"]},
