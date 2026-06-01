@@ -1,0 +1,34 @@
+[project]
+name = "logalot"
+version = "0.0.1"
+description = "Local-first amateur-radio logger with a local-LLM QSO capture front-end"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Ettore Ferranti", email = "hb9iks@example.invalid" }]
+keywords = ["amateur-radio", "ham-radio", "logging", "adif", "whisper", "llm"]
+
+# Core is intentionally dependency-free: models, store, validate, export_adif.
+dependencies = []
+
+[project.optional-dependencies]
+capture = ["sounddevice>=0.4", "numpy>=1.26"]   # + Hamlib rigctld running externally
+asr     = ["faster-whisper>=1.0"]
+parse   = ["httpx>=0.27", "pydantic>=2.7"]       # LM Studio HTTP API
+ui      = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev     = ["pytest>=8.0"]
+all     = ["logalot[capture,asr,parse,ui,dev]"]
+
+[project.scripts]
+logalot = "logalot.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# LogALot local artefacts
+*.db
+*.db-journal
+*.adi
+*.wav
+models/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
