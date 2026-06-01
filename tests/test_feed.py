@@ -246,6 +246,29 @@ def test_recent_text_caps_to_recent_window():
     assert len(text) <= 60
 
 
+def test_feed_drops_cq_and_qcodes_from_candidate():
+    audio = FakeAudio()
+    parser = StubParser({"call": "CQDX", "qth": "Bern"})
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
+                          parser=parser, parse_debounce_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        cand = None
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            msg = sub.get(timeout=5)
+            if isinstance(msg, dict) and msg.get("kind") == "candidate":
+                cand = msg
+                break
+    finally:
+        feed.stop()
+    assert cand is not None
+    assert "call" not in cand          # CQDX is not a worked callsign
+    assert cand.get("qth") == "Bern"   # other fields still kept
+
+
 def test_feed_no_parser_means_no_candidate():
     audio = FakeAudio()
     feed = TranscriptFeed(audio, StubTranscriber(), parser=None)

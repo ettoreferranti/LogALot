@@ -15,6 +15,20 @@ _CALL_RE = re.compile(r"^[A-Z0-9]{1,3}[0-9][A-Z]{1,4}$")
 # Affixes carrying no call identity; stripped before validation, kept as context.
 _KNOWN_SUFFIXES = {"P", "M", "MM", "AM", "QRP", "A"}
 
+# Calling indicators and Q-codes the parser sometimes mistakes for a worked
+# callsign. None of these is ever a valid amateur call, so the candidate builder
+# drops a "call" that matches one of them.
+NON_CALLSIGNS = {
+    "CQ", "CQCQ", "CQDX", "QRZ", "DX", "DE", "SOS", "TEST",
+    "QSL", "QTH", "QRM", "QRN", "QSB", "QSY", "QSO", "QRP", "QRL", "73", "88",
+}
+
+
+def looks_like_callsign(call: str) -> bool:
+    """A worked-station call worth showing: not a CQ/Q-code, and call-shaped."""
+    c = call.upper().strip()
+    return c not in NON_CALLSIGNS and is_valid_call(c)
+
 NATO = {
     "alpha": "A", "alfa": "A", "bravo": "B", "charlie": "C", "delta": "D",
     "echo": "E", "foxtrot": "F", "golf": "G", "hotel": "H", "india": "I",

@@ -2,6 +2,7 @@ from logalot.validate import (
     confidence_flag,
     expand_phonetics,
     is_valid_call,
+    looks_like_callsign,
     normalise_call,
 )
 
@@ -39,3 +40,10 @@ def test_normalise_prefix_form():
 def test_confidence_flag():
     assert confidence_flag("HB9IKS") == "ok"
     assert confidence_flag("not-a-call") == "review"
+
+
+def test_looks_like_callsign_rejects_cq_and_qcodes():
+    assert looks_like_callsign("HB9IKS")
+    assert looks_like_callsign("w1aw")
+    for junk in ["CQ", "CQDX", "QRZ", "DX", "QTH", "73"]:
+        assert not looks_like_callsign(junk), junk
