@@ -12,9 +12,11 @@ keywords = ["amateur-radio", "ham-radio", "logging", "adif", "whisper", "llm"]
 dependencies = []
 
 [project.optional-dependencies]
+# Runtime deps, all in-process & local — no external servers. asr/parse are
+# Apple-Silicon MLX (models pulled from the HuggingFace mlx-community hub).
 capture = ["sounddevice>=0.4", "numpy>=1.26"]   # + Hamlib rigctld running externally
-asr     = ["faster-whisper>=1.0"]
-parse   = ["httpx>=0.27", "pydantic>=2.7"]       # LM Studio HTTP API
+asr     = ["mlx-whisper>=0.4", "numpy>=1.26"]
+parse   = ["mlx-lm>=0.19", "mlx>=0.18"]
 ui      = ["fastapi>=0.110", "uvicorn>=0.29"]
 dev     = ["pytest>=8.0"]
 all     = ["logalot[capture,asr,parse,ui,dev]"]

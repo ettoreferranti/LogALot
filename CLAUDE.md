@@ -9,8 +9,12 @@ it listens to received audio, transcribes it, parses QSO details with a *local*
 LLM, and writes them to a logbook. Nothing leaves the machine. The novel part is
 the local-LLM QSO capture; the logging core is deliberately boring and reliable.
 
-Operator: HB9IKS (Switzerland). Rig: Yaesu FTDX10. Host: MacBook Pro M4, 48 GB,
-LM Studio + MLX backend (candidate parse models: Apertus, Qwen2.5-Instruct).
+Operator: HB9IKS (Switzerland). Rig: Yaesu FTDX10. Host: MacBook Pro M4, 48 GB.
+AI runs **in-process via MLX** — no LM Studio/Ollama/server on the side. Models
+are pulled from the HuggingFace `mlx-community` hub and loaded inside the app
+(`mlx-lm` for parse, `mlx-whisper` for ASR); all MLX work funnels through one
+shared Metal thread (`logalot.mlx_runtime`). Candidate parse models: Qwen2.5-
+Instruct (default), Apertus (ETH/EPFL, the Swiss option).
 
 ## The one invariant that must never break
 
@@ -65,10 +69,11 @@ numbers it can get from the rig. System clock in UTC for timestamps.
   Verify this round-trips into MacLoggerDX before building anything clever.
 - **M1 — capture.** rigctld integration (Hamlib `rigctld -m <id> -r <device>`),
   audio device selection (FTDX10 USB CODEC), ring buffer.
-- **M2 — asr.** faster-whisper wrapper, `large-v3`, VAD segmentation. Expect poor
-  copy on weak signals — this is the SNR-limited part.
-- **M3 — parse.** LM Studio HTTP call, JSON-only prompt, schema validation,
-  rejection of malformed output. NATO-phonetic expansion before callsign regex.
+- **M2 — asr.** in-process `mlx-whisper` (`large-v3-turbo` default), VAD
+  segmentation. Expect poor copy on weak signals — this is the SNR-limited part.
+- **M3 — parse.** in-process `mlx-lm` generate, JSON-only prompt, schema
+  validation, rejection of malformed output. NATO-phonetic expansion before
+  callsign regex.
 - **M4 — review queue UI.** Thin local web UI (or Tauri) to confirm/edit/reject
   candidates. This is where the human commits.
 - **M5 — logger adapters.** Beyond ADIF: Wavelog/Cloudlog API, later LoTW/TQSL.
