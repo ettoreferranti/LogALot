@@ -83,8 +83,13 @@ def rig():
         s.stop()
 
 
-FREQ_20M = "Frequency: 14074000\nRPRT 0\n"
-MODE_USB = "Mode: USB\nPassband: 2400\nRPRT 0\n"
+# Replies mimic real rigctld extended protocol: a leading echo line (the
+# canonical command name), payload line(s), then RPRT. The S-meter payload is a
+# bare value with no label, which is exactly the case that used to be dropped.
+FREQ_20M = "get_freq:\nFrequency: 14074000\nRPRT 0\n"
+MODE_USB = "get_mode:\nMode: USB\nPassband: 2400\nRPRT 0\n"
+PTT_RX = "get_ptt:\nPTT: 0\nRPRT 0\n"
+STRENGTH = "get_level: STRENGTH\n-24\nRPRT 0\n"
 
 
 def test_freq_mhz(rig):
@@ -110,12 +115,50 @@ def test_state_combines_freq_mode_band(rig):
 
 
 def test_state_data_mode_maps_to_data_keeps_raw(rig):
-    s = rig({"f": "Frequency: 7074000\nRPRT 0\n", "m": "Mode: PKTUSB\nPassband: 3000\nRPRT 0\n"})
+    s = rig({"f": "get_freq:\nFrequency: 7074000\nRPRT 0\n",
+             "m": "get_mode:\nMode: PKTUSB\nPassband: 3000\nRPRT 0\n"})
     with RigctldClient(s.host, s.port) as c:
         st = c.state()
     assert st.mode == "DATA"
     assert st.raw_mode == "PKTUSB"
     assert st.band == "40m"
+
+
+def test_ptt_parsing(rig):
+    s = rig({"t": PTT_RX})
+    with RigctldClient(s.host, s.port) as c:
+        assert c.ptt() is False
+    s2 = rig({"t": "get_ptt:\nPTT: 1\nRPRT 0\n"})
+    with RigctldClient(s2.host, s2.port) as c:
+        assert c.ptt() is True
+
+
+def test_strength_bare_value_not_dropped(rig):
+    # Regression: the S-meter payload is a bare line with no `Label:`; it must
+    # survive parsing rather than being silently discarded.
+    s = rig({"l STRENGTH": STRENGTH})
+    with RigctldClient(s.host, s.port) as c:
+        assert c.strength_dbs9() == -24
+
+
+def test_monitor_includes_smeter_and_ptt(rig):
+    s = rig({"f": FREQ_20M, "m": MODE_USB, "t": PTT_RX, "l STRENGTH": STRENGTH})
+    with RigctldClient(s.host, s.port) as c:
+        st = c.monitor()
+    assert st.band == "20m" and st.mode == "SSB"
+    assert st.strength_dbs9 == -24
+    assert st.ptt is False
+
+
+def test_monitor_tolerates_missing_level(rig):
+    # A rig that doesn't support STRENGTH/PTT (RPRT error) should still yield a
+    # core snapshot with those fields left as None, not blow up.
+    s = rig({"f": FREQ_20M, "m": MODE_USB, "t": "RPRT -1\n", "l STRENGTH": "RPRT -1\n"})
+    with RigctldClient(s.host, s.port) as c:
+        st = c.monitor()
+    assert st.freq_mhz == pytest.approx(14.074)
+    assert st.strength_dbs9 is None
+    assert st.ptt is None
 
 
 def test_rprt_error_raises(rig):
