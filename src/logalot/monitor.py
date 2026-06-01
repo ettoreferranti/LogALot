@@ -36,6 +36,9 @@ _PARSE_MODELS = [
     "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
     "mlx-community/Qwen2.5-3B-Instruct-4bit",
     "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "mlx-community/Qwen2.5-14B-Instruct-4bit",     # ~8 GB — recommended upgrade
+    "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",  # ~13 GB — strong EU languages
+    "mlx-community/Qwen2.5-32B-Instruct-4bit",     # ~18 GB — top practical quality
 ]
 
 
