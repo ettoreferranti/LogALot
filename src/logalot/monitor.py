@@ -24,7 +24,19 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from .audio import AudioCapture, AudioError, dbfs_to_pct
 from .capture import CatError, RigctldClient
 from .feed import TranscriptEntry, TranscriptFeed
-from .mlx_runtime import is_available
+from .mlx_runtime import DEFAULT_PARSE_MODEL, is_available
+
+# Whisper supports many languages; this is a pragmatic EU-centric shortlist plus
+# "auto" (per-segment detection). Operators can still pass any code via the CLI.
+_LANGUAGES = ["auto", "en", "de", "fr", "it", "es", "nl", "pt", "ru", "pl", "sv", "cs"]
+
+# Preset mlx-community parse models, small→large. The running default is added in
+# the settings payload if it isn't already here.
+_PARSE_MODELS = [
+    "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "mlx-community/Qwen2.5-3B-Instruct-4bit",
+    "mlx-community/Qwen2.5-7B-Instruct-4bit",
+]
 
 
 def smeter_label(dbs9: int | None) -> str:
@@ -89,7 +101,8 @@ def _snapshot(client: RigctldClient, audio: AudioCapture | None = None) -> dict:
 def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                audio_device: str | None = None, enable_audio: bool = True,
                enable_asr: bool = True, enable_parse: bool = True,
-               vad_threshold: float = -45.0, min_logprob: float = -1.0) -> FastAPI:
+               vad_threshold: float = -45.0, min_logprob: float = -1.0,
+               language: str = "auto") -> FastAPI:
     app = FastAPI(title="LogALot rig monitor")
     # One persistent CAT client for the app's lifetime; reconnects internally.
     client = RigctldClient(rig_host, rig_port)
@@ -113,6 +126,7 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
     if enable_asr and audio is not None and is_available():
         from .asr import WhisperTranscriber
 
+        lang = None if language in (None, "", "auto") else language
         parser = None
         if enable_parse:
             try:
@@ -122,8 +136,9 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                 parser = MLXParser()
             except ImportError:
                 print("parse: install the [parse] extra for the candidate panel")
-        feed = TranscriptFeed(audio, WhisperTranscriber(), cat=client, parser=parser,
-                              vad_threshold_dbfs=vad_threshold, min_logprob=min_logprob)
+        feed = TranscriptFeed(audio, WhisperTranscriber(language=lang), cat=client,
+                              parser=parser, vad_threshold_dbfs=vad_threshold,
+                              min_logprob=min_logprob)
         feed.start()
         asr_status = "listening"
         print("asr: transcript feed started" + (" (+parse)" if parser else ""))
@@ -141,6 +156,37 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
             _transcript_events(request, feed, asr_status),
             media_type="text/event-stream",
         )
+
+    @app.get("/api/settings")
+    def get_settings() -> JSONResponse:
+        if feed is None:
+            return JSONResponse({"ok": False})
+        models = list(_PARSE_MODELS)
+        current = feed.settings().get("parse_model")
+        if current and current not in models:
+            models.insert(0, current)
+        return JSONResponse({
+            "ok": True,
+            "settings": feed.settings(),
+            "languages": _LANGUAGES,
+            "parse_models": models,
+            "has_parser": feed.parser is not None,
+        })
+
+    @app.post("/api/settings")
+    async def post_settings(request: Request) -> JSONResponse:
+        if feed is None:
+            return JSONResponse({"ok": False, "error": "feed not running"}, status_code=409)
+        body = await request.json()
+        if "vad_threshold" in body:
+            feed.set_vad_threshold(float(body["vad_threshold"]))
+        if "min_logprob" in body:
+            feed.set_min_logprob(float(body["min_logprob"]))
+        if "language" in body:
+            feed.set_language(body["language"])
+        if "parse_model" in body:
+            feed.set_parse_model(body["parse_model"])
+        return JSONResponse({"ok": True, "settings": feed.settings()})
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -245,6 +291,13 @@ _PAGE = """<!doctype html>
   .cv.call.ok { color:#2ea043; } .cv.call.review { color:#d29922; }
   .badge { font-size:10px; border:1px solid #30363d; border-radius:999px; padding:1px 7px;
            color:#7d8590; vertical-align:middle; margin-left:8px; }
+  .controls { margin-top:24px; border-top:1px solid #30363d; padding-top:16px;
+              display:grid; grid-template-columns:auto 1fr auto; gap:12px 14px; align-items:center; font-size:13px; }
+  .controls > label { color:#7d8590; }
+  .controls .val { color:#e6edf3; font-variant-numeric:tabular-nums; text-align:right; min-width:62px; }
+  .controls input[type=range] { width:100%; accent-color:#1f6feb; }
+  .controls select { width:100%; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
+                     border-radius:6px; padding:5px 8px; font:inherit; }
 </style></head>
 <body>
   <div class="panel">
@@ -272,6 +325,16 @@ _PAGE = """<!doctype html>
     <div class="cand" id="cand" hidden>
       <div class="txhead"><span>Candidate QSO<span class="badge">advisory · not logged</span></span></div>
       <div class="candbody" id="candbody"></div>
+    </div>
+    <div class="controls" id="controls" hidden>
+      <label for="c_lang">Language</label>
+      <select id="c_lang"></select><span class="val" id="c_lang_v"></span>
+      <label for="c_vad">VAD gate</label>
+      <input type="range" id="c_vad" min="-60" max="-10" step="1"><span class="val" id="c_vad_v"></span>
+      <label for="c_lp">Min logprob</label>
+      <input type="range" id="c_lp" min="-3" max="0" step="0.1"><span class="val" id="c_lp_v"></span>
+      <label for="c_model" id="c_model_l">LLM model</label>
+      <select id="c_model"></select><span class="val"></span>
     </div>
   </div>
 <script>
@@ -328,6 +391,43 @@ es.onmessage = (ev) => {
   log.scrollTop = log.scrollHeight;
 };
 es.onerror = () => { document.getElementById('asr').textContent = 'reconnecting…'; };
+
+// Live controls — apply without restarting (settings are read per segment).
+function postSettings(body){
+  fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+                          body:JSON.stringify(body)});
+}
+async function loadControls(){
+  let d; try { d = await (await fetch('/api/settings')).json(); } catch(e){ return; }
+  if (!d.ok) return;                       // no feed (audio/ASR off)
+  const s = d.settings, $ = id => document.getElementById(id);
+  $('controls').hidden = false;
+
+  const lang = $('c_lang');
+  lang.innerHTML = d.languages.map(l => '<option'+(l===s.language?' selected':'')+'>'+l+'</option>').join('');
+  $('c_lang_v').textContent = s.language;
+  lang.onchange = () => { postSettings({language: lang.value}); $('c_lang_v').textContent = lang.value; };
+
+  const vad = $('c_vad'); vad.value = s.vad_threshold;
+  $('c_vad_v').textContent = s.vad_threshold + ' dBFS';
+  vad.oninput  = () => $('c_vad_v').textContent = vad.value + ' dBFS';
+  vad.onchange = () => postSettings({vad_threshold: parseFloat(vad.value)});
+
+  const lp = $('c_lp'); lp.value = s.min_logprob;
+  $('c_lp_v').textContent = (+s.min_logprob).toFixed(1);
+  lp.oninput  = () => $('c_lp_v').textContent = (+lp.value).toFixed(1);
+  lp.onchange = () => postSettings({min_logprob: parseFloat(lp.value)});
+
+  const ml = $('c_model');
+  if (d.has_parser){
+    ml.innerHTML = d.parse_models.map(m =>
+      '<option value="'+m+'"'+(m===s.parse_model?' selected':'')+'>'+esc(m.replace('mlx-community/',''))+'</option>').join('');
+    ml.onchange = () => postSettings({parse_model: ml.value});
+  } else {
+    ml.disabled = true; $('c_model_l').textContent = 'LLM model (off)';
+  }
+}
+loadControls();
 
 const CAND_FIELDS = {name:'name', qth:'qth', rst_sent:'rst s', rst_rcvd:'rst r',
                      gridsquare:'grid', comment:'cmt'};

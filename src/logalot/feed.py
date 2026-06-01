@@ -72,10 +72,40 @@ class TranscriptFeed:
         self._win_version = 0
         self._last_utterance_at = 0.0
 
+        self._vad = None               # set in _run; kept so settings can retune it live
         self._subs: list[queue.Queue] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+
+    # --- live settings (mutated from the dashboard, no restart) ---------------
+    # Each value is read per-segment, so a plain attribute swap takes effect on
+    # the next utterance. Scalar assignment is atomic under the GIL — no lock.
+
+    def settings(self) -> dict:
+        lang = getattr(self.transcriber, "language", None)
+        return {
+            "vad_threshold": self.vad_threshold_dbfs,
+            "min_logprob": self.min_logprob,
+            "language": lang if lang else "auto",
+            "parse_model": getattr(self.parser, "model_path", None),
+        }
+
+    def set_vad_threshold(self, dbfs: float) -> None:
+        self.vad_threshold_dbfs = dbfs
+        if self._vad is not None:
+            self._vad.threshold_dbfs = dbfs
+
+    def set_min_logprob(self, value: float) -> None:
+        self.min_logprob = value
+
+    def set_language(self, lang: str | None) -> None:
+        # "" / "auto" -> None (Whisper auto-detects the language per segment).
+        self.transcriber.language = None if (not lang or lang == "auto") else lang
+
+    def set_parse_model(self, model_path: str) -> None:
+        if self.parser is not None and model_path:
+            self.parser.model_path = model_path   # loads lazily on next parse
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -112,7 +142,7 @@ class TranscriptFeed:
 
     def _run(self) -> None:
         tap = self.audio.tap()
-        vad = EnergyVAD(self.audio.samplerate, threshold_dbfs=self.vad_threshold_dbfs)
+        vad = self._vad = EnergyVAD(self.audio.samplerate, threshold_dbfs=self.vad_threshold_dbfs)
         while not self._stop.is_set():
             try:
                 block = tap.get(timeout=0.2)

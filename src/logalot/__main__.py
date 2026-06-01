@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="speech gate in dBFS; raise toward the band noise floor (default -45)")
     m.add_argument("--min-logprob", type=float, default=-1.0,
                    help="drop transcripts below this mean token logprob (default -1.0)")
+    m.add_argument("--language", default="auto",
+                   help="ASR language code, or 'auto' to detect (default auto); tunable live")
     m.add_argument("--list-audio", action="store_true",
                    help="list input devices and exit")
 
@@ -86,7 +88,8 @@ def _run_monitor(args) -> int:
     app = create_app(args.rig_host, args.rig_port,
                      audio_device=args.audio_device, enable_audio=not args.no_audio,
                      enable_asr=not args.no_asr, enable_parse=not args.no_parse,
-                     vad_threshold=args.vad_threshold, min_logprob=args.min_logprob)
+                     vad_threshold=args.vad_threshold, min_logprob=args.min_logprob,
+                     language=args.language)
     print(f"rig monitor on http://{args.host}:{args.port}  (rigctld {args.rig_host}:{args.rig_port})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

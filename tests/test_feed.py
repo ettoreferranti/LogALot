@@ -189,6 +189,44 @@ def test_feed_builds_advisory_candidate():
     assert parser.calls >= 1
 
 
+def test_feed_live_settings_are_mutable():
+    audio = FakeAudio()
+    tr = StubTranscriber()
+    parser = StubParser({"call": "HB9IKS"})
+    feed = TranscriptFeed(audio, tr, parser=parser)
+
+    feed.set_vad_threshold(-28.0)
+    feed.set_min_logprob(-0.7)
+    feed.set_language("de")
+    feed.set_parse_model("mlx-community/Qwen2.5-7B-Instruct-4bit")
+    s = feed.settings()
+    assert s["vad_threshold"] == -28.0
+    assert s["min_logprob"] == -0.7
+    assert s["language"] == "de"
+    assert s["parse_model"].endswith("7B-Instruct-4bit")
+
+    # "auto" maps to None on the transcriber but surfaces as "auto" in settings.
+    feed.set_language("auto")
+    assert feed.settings()["language"] == "auto"
+    assert tr.language is None
+
+
+def test_feed_vad_threshold_retunes_running_vad():
+    audio = FakeAudio()
+    feed = TranscriptFeed(audio, StubTranscriber())
+    feed.start()
+    try:
+        for _ in range(40):                 # wait for _run to build the VAD
+            if feed._vad is not None:
+                break
+            time.sleep(0.02)
+        assert feed._vad is not None
+        feed.set_vad_threshold(-25.0)
+        assert feed._vad.threshold_dbfs == -25.0
+    finally:
+        feed.stop()
+
+
 def test_feed_no_parser_means_no_candidate():
     audio = FakeAudio()
     feed = TranscriptFeed(audio, StubTranscriber(), parser=None)
