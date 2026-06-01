@@ -13,11 +13,18 @@ are installed (the stdlib core and the M0 CLI never import it).
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+import asyncio
+import json
+import queue
+from dataclasses import asdict
+
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .audio import AudioCapture, AudioError, dbfs_to_pct
 from .capture import CatError, RigctldClient
+from .feed import TranscriptFeed
+from .mlx_runtime import is_available
 
 
 def smeter_label(dbs9: int | None) -> str:
@@ -80,7 +87,8 @@ def _snapshot(client: RigctldClient, audio: AudioCapture | None = None) -> dict:
 
 
 def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
-               audio_device: str | None = None, enable_audio: bool = True) -> FastAPI:
+               audio_device: str | None = None, enable_audio: bool = True,
+               enable_asr: bool = True) -> FastAPI:
     app = FastAPI(title="LogALot rig monitor")
     # One persistent CAT client for the app's lifetime; reconnects internally.
     client = RigctldClient(rig_host, rig_port)
@@ -97,9 +105,31 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
             print(f"audio: off ({e})")
             audio = None
 
+    # Transcript feed needs audio + the MLX [asr] extra. Without them the panel
+    # shows why; the rest of the dashboard is unaffected.
+    feed: TranscriptFeed | None = None
+    asr_status = "off"
+    if enable_asr and audio is not None and is_available():
+        from .asr import WhisperTranscriber
+
+        feed = TranscriptFeed(audio, WhisperTranscriber(), cat=client)
+        feed.start()
+        asr_status = "listening"
+        print("asr: transcript feed started")
+    elif enable_asr and audio is not None:
+        asr_status = "ASR unavailable — install the [asr] extra (Apple Silicon)"
+        print(f"asr: {asr_status}")
+
     @app.get("/api/state")
     def state() -> JSONResponse:
         return JSONResponse(_snapshot(client, audio))
+
+    @app.get("/api/transcript")
+    async def transcript(request: Request) -> StreamingResponse:
+        return StreamingResponse(
+            _transcript_events(request, feed, asr_status),
+            media_type="text/event-stream",
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -107,10 +137,40 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        if feed is not None:
+            feed.stop()
         if audio is not None:
             audio.stop()
 
     return app
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+async def _transcript_events(request: Request, feed: TranscriptFeed | None, asr_status: str):
+    """SSE generator: replay recent history, then push new entries as they land.
+    Sends keepalive comments so a disconnect is noticed promptly."""
+    if feed is None:
+        yield _sse({"info": asr_status})
+        return
+    q = feed.subscribe()
+    loop = asyncio.get_event_loop()
+    try:
+        for e in list(feed.entries):
+            yield _sse(asdict(e))
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                entry = await loop.run_in_executor(None, lambda: q.get(timeout=1.0))
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+            yield _sse(asdict(entry))
+    finally:
+        feed.unsubscribe(q)
 
 
 # Single self-contained page: dark panel, big frequency readout, mode/band chips,
@@ -147,6 +207,15 @@ _PAGE = """<!doctype html>
   .ptt .txt { font-weight:600; letter-spacing:.05em; }
   .offline { color:#f85149; }
   .muted { color:#7d8590; }
+  .tx { margin-top:24px; border-top:1px solid #30363d; padding-top:16px; }
+  .txhead { display:flex; justify-content:space-between; font-size:13px; color:#7d8590; margin-bottom:10px; }
+  .txlog { max-height:240px; overflow-y:auto; display:flex; flex-direction:column; gap:8px;
+           font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .row { display:grid; grid-template-columns:64px 1fr auto; gap:10px; align-items:baseline; }
+  .rtime { color:#7d8590; font-variant-numeric:tabular-nums; }
+  .rtext { color:#e6edf3; word-break:break-word; }
+  .rmeta { color:#6e7681; font-size:11px; white-space:nowrap; }
+  .txlog .empty { color:#6e7681; }
 </style></head>
 <body>
   <div class="panel">
@@ -167,6 +236,10 @@ _PAGE = """<!doctype html>
     </div>
     <div class="ptt"><span class="lamp" id="lamp"></span><span class="txt" id="pttxt">—</span>
       <span class="muted" id="status" style="margin-left:auto"></span></div>
+    <div class="tx">
+      <div class="txhead"><span>Transcript · remote operator (RX)</span><span id="asr">—</span></div>
+      <div class="txlog" id="txlog"><span class="empty">waiting for speech…</span></div>
+    </div>
   </div>
 <script>
 async function tick() {
@@ -202,6 +275,24 @@ async function tick() {
   }
 }
 tick(); setInterval(tick, 750);
+
+// Transcript via Server-Sent Events (push, not poll).
+function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+const es = new EventSource('/api/transcript');
+es.onmessage = (ev) => {
+  const d = JSON.parse(ev.data);
+  const asr = document.getElementById('asr'), log = document.getElementById('txlog');
+  if (d.info !== undefined) { asr.textContent = d.info; return; }
+  asr.textContent = 'listening';
+  const empty = log.querySelector('.empty'); if (empty) empty.remove();
+  const conf = (d.avg_logprob != null) ? ' · lp ' + d.avg_logprob.toFixed(2) : '';
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = '<span class="rtime">'+d.utc+'</span><span class="rtext">'+esc(d.text)+
+                  '</span><span class="rmeta">'+d.dur_s+'s'+conf+'</span>';
+  log.appendChild(row);
+  log.scrollTop = log.scrollHeight;
+};
+es.onerror = () => { document.getElementById('asr').textContent = 'reconnecting…'; };
 </script>
 </body></html>
 """

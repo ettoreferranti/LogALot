@@ -29,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--audio-device", default=None,
                    help="input device name substring (default: USB Audio CODEC)")
     m.add_argument("--no-audio", action="store_true", help="disable audio capture")
+    m.add_argument("--no-asr", action="store_true",
+                   help="disable the transcript feed (audio level only)")
     m.add_argument("--list-audio", action="store_true",
                    help="list input devices and exit")
 
@@ -76,7 +78,8 @@ def _run_monitor(args) -> int:
     from .monitor import create_app
 
     app = create_app(args.rig_host, args.rig_port,
-                     audio_device=args.audio_device, enable_audio=not args.no_audio)
+                     audio_device=args.audio_device, enable_audio=not args.no_audio,
+                     enable_asr=not args.no_asr)
     print(f"rig monitor on http://{args.host}:{args.port}  (rigctld {args.rig_host}:{args.rig_port})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

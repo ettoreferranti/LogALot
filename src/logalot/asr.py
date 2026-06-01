@@ -14,9 +14,11 @@ maximum accuracy at lower speed.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
 
+from .audio import rms_to_dbfs
 from .mlx_runtime import DEFAULT_ASR_MODEL, run_blocking
 
 
@@ -30,6 +32,122 @@ class Segment:
 
 class Transcriber(Protocol):
     def transcribe(self, audio: "object") -> list[Segment]: ...
+
+
+def resample_to_16k(audio, src_sr: int, target_sr: int = 16000):
+    """Resample mono float32 to Whisper's 16 kHz. The capture path is 48 kHz, an
+    exact 3:1 ratio — averaging groups of 3 both low-passes and decimates in one
+    step. Non-integer ratios fall back to linear interpolation."""
+    import numpy as np
+
+    audio = np.asarray(audio, dtype=np.float32)
+    if src_sr == target_sr or audio.size == 0:
+        return audio
+    ratio = src_sr / target_sr
+    if ratio == int(ratio):
+        f = int(ratio)
+        trimmed = audio[: (audio.size // f) * f]
+        if trimmed.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        return trimmed.reshape(-1, f).mean(axis=1).astype(np.float32)
+    n = int(round(audio.size * target_sr / src_sr))
+    x_old = np.linspace(0.0, 1.0, audio.size, endpoint=False)
+    x_new = np.linspace(0.0, 1.0, n, endpoint=False)
+    return np.interp(x_new, x_old, audio).astype(np.float32)
+
+
+class EnergyVAD:
+    """Energy-gated streaming voice-activity segmenter.
+
+    Feed audio blocks of any length via :meth:`push`; it returns completed
+    utterance segments (mono float32 at the source samplerate) as speech ends.
+    Crude by design — on weak SSB the "speech" is noisy — but enough to chop the
+    RX stream into utterances for per-segment transcription (CLAUDE.md open Q3).
+    A short pre-roll is prepended so word onsets aren't clipped, and a trailing
+    silence "hang" closes the segment.
+    """
+
+    def __init__(self, samplerate: int, frame_ms: int = 30, threshold_dbfs: float = -45.0,
+                 start_frames: int = 3, hang_ms: int = 600, min_speech_ms: int = 300,
+                 max_segment_s: float = 20.0, preroll_ms: int = 200) -> None:
+        import numpy as np
+
+        self._np = np
+        self.samplerate = samplerate
+        self.frame = max(1, int(samplerate * frame_ms / 1000))
+        self.threshold_dbfs = threshold_dbfs
+        self.start_frames = start_frames
+        self.hang_frames = max(1, int(hang_ms / frame_ms))
+        self.min_speech_frames = max(1, int(min_speech_ms / frame_ms))
+        self.max_frames = max(1, int(max_segment_s * 1000 / frame_ms))
+        self._acc = np.zeros(0, dtype=np.float32)
+        self._pre: deque = deque(maxlen=max(1, int(preroll_ms / frame_ms)))
+        self._seg: list = []
+        self._active = False
+        self._voiced_run = 0
+        self._silence_run = 0
+        self._speech_frames = 0
+
+    def push(self, block) -> list:
+        """Add audio; return any utterance segments completed by it."""
+        np = self._np
+        self._acc = np.concatenate([self._acc, np.asarray(block, dtype=np.float32)])
+        out = []
+        while self._acc.size >= self.frame:
+            frame = self._acc[: self.frame]
+            self._acc = self._acc[self.frame:]
+            seg = self._frame(frame)
+            if seg is not None:
+                out.append(seg)
+        return out
+
+    def flush(self):
+        """Close and return any in-progress utterance (call on stop). None if
+        nothing worth keeping."""
+        if self._active and self._speech_frames >= self.min_speech_frames:
+            return self._close()
+        self._reset()
+        return None
+
+    def _frame(self, frame):
+        np = self._np
+        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+        voiced = rms_to_dbfs(rms) > self.threshold_dbfs
+        if not self._active:
+            self._pre.append(frame)
+            if voiced:
+                self._voiced_run += 1
+                if self._voiced_run >= self.start_frames:
+                    self._active = True
+                    self._seg = list(self._pre)
+                    self._pre.clear()
+                    self._speech_frames = self._voiced_run
+                    self._silence_run = 0
+            else:
+                self._voiced_run = 0
+            return None
+        self._seg.append(frame)
+        if voiced:
+            self._speech_frames += 1
+            self._silence_run = 0
+        else:
+            self._silence_run += 1
+        if self._silence_run >= self.hang_frames or len(self._seg) >= self.max_frames:
+            return self._close()
+        return None
+
+    def _close(self):
+        seg = self._np.concatenate(self._seg) if self._seg else None
+        keep = seg is not None and self._speech_frames >= self.min_speech_frames
+        self._reset()
+        return seg if keep else None
+
+    def _reset(self) -> None:
+        self._seg = []
+        self._active = False
+        self._voiced_run = 0
+        self._silence_run = 0
+        self._speech_frames = 0
 
 
 class WhisperTranscriber:

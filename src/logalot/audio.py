@@ -14,6 +14,7 @@ the dashboard's "audio off" path don't need hardware).
 from __future__ import annotations
 
 import math
+import queue
 import threading
 from dataclasses import dataclass
 from typing import Protocol
@@ -154,6 +155,15 @@ class AudioCapture:
         self._ring: RingBuffer | None = None
         self._last_rms = 0.0          # float store/read is atomic enough for a meter
         self._overflows = 0
+        self._taps: list[queue.Queue] = []   # lossless ordered feeds (e.g. the ASR worker)
+
+    def tap(self) -> queue.Queue:
+        """Register a queue that receives every captured block (a copy), in
+        order. Unlike the ring buffer (which overwrites), a tap loses nothing
+        even if the consumer stalls during a slow transcription."""
+        q: queue.Queue = queue.Queue()
+        self._taps.append(q)
+        return q
 
     @property
     def device_label(self) -> str:
@@ -196,6 +206,10 @@ class AudioCapture:
             self._last_rms = float(np.sqrt(np.mean(mono.astype(np.float64) ** 2)))
         if self._ring is not None:
             self._ring.write(mono)
+        if self._taps:
+            block = mono.copy()   # indata is reused by PortAudio; copy before handing off
+            for q in self._taps:
+                q.put(block)
 
     def level_dbfs(self) -> float:
         return rms_to_dbfs(self._last_rms)
