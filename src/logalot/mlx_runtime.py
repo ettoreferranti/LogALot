@@ -22,15 +22,46 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import os
+import queue
+import threading
 from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
 
-# Single shared worker for ALL MLX/Metal work in the process. Do not add more
-# workers — see the module docstring; this serialisation is load-bearing.
-_MLX_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="mlx"
-)
+
+class _MetalWorker:
+    """Single shared worker thread for ALL MLX/Metal work in the process — do not
+    parallelise it; that serialisation is load-bearing (see module docstring).
+
+    It is a **daemon** thread on purpose: a ``ThreadPoolExecutor`` uses non-daemon
+    workers and joins them at interpreter exit, so a Ctrl+C while a model is
+    downloading or an inference is running would hang the process forever. A
+    daemon thread lets the process exit immediately (an in-flight HF download just
+    resumes next launch).
+    """
+
+    def __init__(self) -> None:
+        self._q: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="mlx", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            fn, fut = self._q.get()
+            if not fut.set_running_or_notify_cancel():
+                continue
+            try:
+                fut.set_result(fn())
+            except BaseException as exc:  # propagate to the caller's future
+                fut.set_exception(exc)
+
+    def submit(self, fn: Callable[[], T]) -> "concurrent.futures.Future[T]":
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        self._q.put((fn, fut))
+        return fut
+
+
+_MLX_WORKER = _MetalWorker()
 
 # Default models, overridable by env so we never hard-code a single choice.
 # Parse: Qwen2.5 instruct follows JSON instructions well (code-rally precedent).
@@ -57,14 +88,13 @@ def is_available() -> bool:
 def run_blocking(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Run ``fn`` on the shared MLX thread and block for the result. Use from
     sync/threaded callers (the capture daemon's worker threads)."""
-    return _MLX_EXECUTOR.submit(fn, *args, **kwargs).result()
+    return _MLX_WORKER.submit(lambda: fn(*args, **kwargs)).result()
 
 
 async def run_async(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Awaitable version for the async web layer — keeps heavy MLX work off the
     event loop while still serialising through the one Metal thread."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_MLX_EXECUTOR, lambda: fn(*args, **kwargs))
+    return await asyncio.wrap_future(_MLX_WORKER.submit(lambda: fn(*args, **kwargs)))
 
 
 class LLMRuntime:

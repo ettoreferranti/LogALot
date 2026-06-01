@@ -141,7 +141,11 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                               min_logprob=min_logprob)
         feed.start()
         asr_status = "listening"
-        print("asr: transcript feed started" + (" (+parse)" if parser else ""))
+        print(f"asr model:   {feed.transcriber.model_path}")
+        if parser is not None:
+            print(f"parse model: {parser.model_path}")
+        else:
+            print("parse model: off (candidate panel disabled)")
     elif enable_asr and audio is not None:
         asr_status = "ASR unavailable — install the [asr] extra (Apple Silicon)"
         print(f"asr: {asr_status}")
@@ -340,6 +344,8 @@ _PAGE = """<!doctype html>
       <input type="range" id="c_lp" min="-3" max="0" step="0.1"><span class="val" id="c_lp_v"></span>
       <label for="c_model" id="c_model_l">LLM model</label>
       <select id="c_model"></select><span class="val"></span>
+      <label>ASR model</label>
+      <span id="c_asr" class="muted" style="grid-column:2 / -1;"></span>
     </div>
   </div>
 <script>
@@ -426,6 +432,8 @@ async function loadControls(){
   $('c_lp_v').textContent = (+s.min_logprob).toFixed(1);
   lp.oninput  = () => $('c_lp_v').textContent = (+lp.value).toFixed(1);
   lp.onchange = () => postSettings({min_logprob: parseFloat(lp.value)});
+
+  $('c_asr').textContent = (s.asr_model || '').replace('mlx-community/', '');
 
   const ml = $('c_model');
   if (d.has_parser){

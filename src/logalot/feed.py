@@ -94,6 +94,7 @@ class TranscriptFeed:
             "min_logprob": self.min_logprob,
             "language": lang if lang else "auto",
             "translate": bool(getattr(self.transcriber, "translate", False)),
+            "asr_model": getattr(self.transcriber, "model_path", None),
             "parse_model": getattr(self.parser, "model_path", None),
         }
 
