@@ -154,9 +154,13 @@ class WhisperTranscriber:
     """Wraps mlx-whisper. ``audio`` is a float32 mono ndarray at 16 kHz (what the
     capture ring buffer hands us after resampling the 48 kHz USB CODEC stream)."""
 
-    def __init__(self, model_path: str = DEFAULT_ASR_MODEL, language: str = "en") -> None:
+    def __init__(self, model_path: str = DEFAULT_ASR_MODEL, language: str | None = "en",
+                 translate: bool = False) -> None:
         self.model_path = model_path
         self.language = language
+        # translate=True -> Whisper renders any language into English (task
+        # "translate"); False -> transcribe in the spoken language.
+        self.translate = translate
 
     def transcribe(self, audio) -> list[Segment]:
         def _run() -> dict:
@@ -166,6 +170,7 @@ class WhisperTranscriber:
             # repetition loops ("pink pink pink…") when it hits noise/carriers.
             return mlx_whisper.transcribe(
                 audio, path_or_hf_repo=self.model_path, language=self.language,
+                task="translate" if self.translate else "transcribe",
                 condition_on_previous_text=False,
             )
 

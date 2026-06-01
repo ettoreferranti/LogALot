@@ -210,6 +210,12 @@ def test_feed_live_settings_are_mutable():
     assert feed.settings()["language"] == "auto"
     assert tr.language is None
 
+    # translate toggle (default off) flips the transcriber + settings.
+    assert feed.settings()["translate"] is False
+    feed.set_translate(True)
+    assert tr.translate is True
+    assert feed.settings()["translate"] is True
+
 
 def test_feed_vad_threshold_retunes_running_vad():
     audio = FakeAudio()

@@ -93,6 +93,7 @@ class TranscriptFeed:
             "vad_threshold": self.vad_threshold_dbfs,
             "min_logprob": self.min_logprob,
             "language": lang if lang else "auto",
+            "translate": bool(getattr(self.transcriber, "translate", False)),
             "parse_model": getattr(self.parser, "model_path", None),
         }
 
@@ -107,6 +108,9 @@ class TranscriptFeed:
     def set_language(self, lang: str | None) -> None:
         # "" / "auto" -> None (Whisper auto-detects the language per segment).
         self.transcriber.language = None if (not lang or lang == "auto") else lang
+
+    def set_translate(self, on: bool) -> None:
+        self.transcriber.translate = bool(on)
 
     def set_parse_model(self, model_path: str) -> None:
         if self.parser is not None and model_path:

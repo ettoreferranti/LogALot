@@ -102,7 +102,7 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                audio_device: str | None = None, enable_audio: bool = True,
                enable_asr: bool = True, enable_parse: bool = True,
                vad_threshold: float = -45.0, min_logprob: float = -1.0,
-               language: str = "auto") -> FastAPI:
+               language: str = "auto", translate: bool = False) -> FastAPI:
     app = FastAPI(title="LogALot rig monitor")
     # One persistent CAT client for the app's lifetime; reconnects internally.
     client = RigctldClient(rig_host, rig_port)
@@ -136,8 +136,8 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                 parser = MLXParser()
             except ImportError:
                 print("parse: install the [parse] extra for the candidate panel")
-        feed = TranscriptFeed(audio, WhisperTranscriber(language=lang), cat=client,
-                              parser=parser, vad_threshold_dbfs=vad_threshold,
+        feed = TranscriptFeed(audio, WhisperTranscriber(language=lang, translate=translate),
+                              cat=client, parser=parser, vad_threshold_dbfs=vad_threshold,
                               min_logprob=min_logprob)
         feed.start()
         asr_status = "listening"
@@ -184,6 +184,8 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
             feed.set_min_logprob(float(body["min_logprob"]))
         if "language" in body:
             feed.set_language(body["language"])
+        if "translate" in body:
+            feed.set_translate(body["translate"])
         if "parse_model" in body:
             feed.set_parse_model(body["parse_model"])
         return JSONResponse({"ok": True, "settings": feed.settings()})
@@ -329,6 +331,9 @@ _PAGE = """<!doctype html>
     <div class="controls" id="controls" hidden>
       <label for="c_lang">Language</label>
       <select id="c_lang"></select><span class="val" id="c_lang_v"></span>
+      <label for="c_xlate">Translate→EN</label>
+      <input type="checkbox" id="c_xlate" style="justify-self:start; width:18px; height:18px; accent-color:#1f6feb;">
+      <span class="val" id="c_xlate_v"></span>
       <label for="c_vad">VAD gate</label>
       <input type="range" id="c_vad" min="-60" max="-10" step="1"><span class="val" id="c_vad_v"></span>
       <label for="c_lp">Min logprob</label>
@@ -407,6 +412,10 @@ async function loadControls(){
   lang.innerHTML = d.languages.map(l => '<option'+(l===s.language?' selected':'')+'>'+l+'</option>').join('');
   $('c_lang_v').textContent = s.language;
   lang.onchange = () => { postSettings({language: lang.value}); $('c_lang_v').textContent = lang.value; };
+
+  const xl = $('c_xlate'); xl.checked = !!s.translate;
+  $('c_xlate_v').textContent = s.translate ? 'on' : 'off';
+  xl.onchange = () => { postSettings({translate: xl.checked}); $('c_xlate_v').textContent = xl.checked ? 'on' : 'off'; };
 
   const vad = $('c_vad'); vad.value = s.vad_threshold;
   $('c_vad_v').textContent = s.vad_threshold + ' dBFS';

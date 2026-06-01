@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="drop transcripts below this mean token logprob (default -1.0)")
     m.add_argument("--language", default="auto",
                    help="ASR language code, or 'auto' to detect (default auto); tunable live")
+    m.add_argument("--translate", action="store_true",
+                   help="translate non-English speech to English (default off); tunable live")
     m.add_argument("--list-audio", action="store_true",
                    help="list input devices and exit")
 
@@ -89,7 +91,7 @@ def _run_monitor(args) -> int:
                      audio_device=args.audio_device, enable_audio=not args.no_audio,
                      enable_asr=not args.no_asr, enable_parse=not args.no_parse,
                      vad_threshold=args.vad_threshold, min_logprob=args.min_logprob,
-                     language=args.language)
+                     language=args.language, translate=args.translate)
     print(f"rig monitor on http://{args.host}:{args.port}  (rigctld {args.rig_host}:{args.rig_port})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
