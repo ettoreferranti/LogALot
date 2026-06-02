@@ -117,11 +117,15 @@ class LLMRuntime:
             ) from e
         self.model_path = model_path
         self.max_tokens = max_tokens
+        # Mistral-Small tokenizers ship a buggy regex in transformers; the
+        # upstream-recommended fix_mistral_regex flag corrects tokenization (else
+        # numbers/callsigns can be split wrong). Only pass it to Mistral.
+        tok_cfg = {"fix_mistral_regex": True} if "mistral" in model_path.lower() else {}
         # Visible confirmation of which model is actually in memory (a dropdown
         # swap loads here on the next parse; first use of an uncached model
         # downloads, otherwise it's read from the HF cache).
         print(f"parse: loading {model_path} …", flush=True)
-        self._model, self._tok = load(model_path)
+        self._model, self._tok = load(model_path, tokenizer_config=tok_cfg)
         print(f"parse: loaded {model_path}", flush=True)
         self._generate = generate
 
