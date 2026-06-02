@@ -19,6 +19,29 @@ from typing import Protocol
 from .models import QSO_LLM_SCHEMA, schema_json
 from .mlx_runtime import DEFAULT_PARSE_MODEL, get_llm
 
+# Shared callsign/phonetics knowledge, reused by the single-shot and per-over
+# prompts so they cannot drift.
+_HAM_KNOWLEDGE = (
+    "HOW HAM CONTACTS SOUND\n"
+    "- A calling station says 'CQ CQ CQ this is <callsign>' (CQ = a general call "
+    "to anyone). 'QRZ?' = 'who is calling me?'. CQ / CQDX / QRZ are NOT callsigns.\n"
+    "- A reply addresses the other station, then gives its own: '<call> this is "
+    "<call>'.\n"
+    "- Callsigns are spelled in phonetics — NATO (Alpha, Bravo, Charlie, ...) but "
+    "operators improvise (e.g. 'Germany', 'Radio', 'Ocean'). Convert ALL phonetics "
+    "to the letter/digit they stand for. 'niner'=9, 'zero'/'null'=0.\n"
+    "- RST report = two/three digits, spoken 'five nine' (59) or 'five nine nine' "
+    "(599). Name: 'my name is ...'. QTH = location: 'QTH is ...', 'I'm in ...'.\n"
+    "\n"
+    "CALLSIGN RULES\n"
+    "- A real callsign is a country PREFIX + a digit + a 1-4 letter suffix (HB9IKS, "
+    "DL1ABC, W1AW, F5XYZ, I2ABC, G3ABC, EA4ABC, RA3ABC, JA1ABC). It MUST contain a "
+    "digit. A bare prefix like 'G4' (no suffix) is NOT a complete callsign.\n"
+    "- NEVER return CQ, CQDX, QRZ, DX, a Q-code (QTH, QSL, QRM, ...), '73', a "
+    "report, or a name as a callsign. If you cannot hear a clear, complete call, "
+    "use null. Do NOT guess.\n"
+)
+
 SYSTEM_PROMPT = (
     "You extract structured QSO (contact) details from a transcript of received "
     "amateur-radio speech. The transcript is often noisy, may mix languages, and "
@@ -66,6 +89,65 @@ SYSTEM_PROMPT = (
     "clearly hear. Mode, frequency, band and time come from the radio, not from "
     "you. The JSON must conform to this schema:\n\n"
     + schema_json()
+)
+
+
+# --- per-over extraction (the QSO tracker's input) ---------------------------
+
+# One "over" = one station's transmission. We extract who is speaking (their own
+# call), who they address, and any facts they volunteer. Only "speaker" matters
+# for attribution; everything else is best-effort.
+QSO_OVER_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["from_call"],
+    "properties": {
+        "from_call": {"type": ["string", "null"],
+                      "description": "the TRANSMITTING station's own callsign (the call AFTER 'this is'/'DE'), or null if not stated in this over"},
+        "to_call": {"type": ["string", "null"],
+                    "description": "the callsign being called/worked (the call BEFORE 'this is'), or 'CQ', or null"},
+        "report": {"type": ["string", "null"],
+                   "description": "RST the transmitting station gave the other, e.g. 59 / 599"},
+        "name": {"type": ["string", "null"], "description": "the transmitting station's name"},
+        "qth": {"type": ["string", "null"], "description": "the transmitting station's location"},
+    },
+}
+
+
+def over_schema_json() -> str:
+    return json.dumps(QSO_OVER_SCHEMA, indent=2)
+
+
+OVER_PROMPT = (
+    "You are listening to ONE over (a single transmission by ONE amateur-radio "
+    "station). The text is a possibly-noisy, possibly-non-English transcript and "
+    "may include off-topic chat (weather, equipment). Reply with a SINGLE JSON "
+    "object and nothing else.\n"
+    "\n"
+    + _HAM_KNOWLEDGE +
+    "\n"
+    "FROM vs TO (critical — do not get this backwards):\n"
+    "- The phrase order is '<TO-call> this is <FROM-call>' (also '<TO> DE "
+    "<FROM>'). The FROM-call is the station TRANSMITTING; the TO-call is who it is "
+    "calling. In 'HB9IKS this is DL1ABC', from_call=DL1ABC and to_call=HB9IKS.\n"
+    "- A CQ call ('CQ CQ CQ this is X', even with several CQs) is still the FROM "
+    "station X calling: from_call=X, to_call='CQ'. The call after 'this is' is "
+    "always the FROM station. '73 from X' / 'X here' -> from_call X.\n"
+    "- If the over addresses a station but never gives the TRANSMITTER'S OWN call "
+    "(e.g. 'G3XYZ you are 59'), set from_call to null — do NOT reuse the addressed "
+    "call. report, name and qth describe the FROM (transmitting) station.\n"
+    "\n"
+    "EXAMPLES (input -> output):\n"
+    "'CQ CQ CQ this is Delta Lima One Alpha Bravo Charlie standing by' -> "
+    "{\"from_call\":\"DL1ABC\",\"to_call\":\"CQ\"}\n"
+    "'Golf Three Xray Yankee Zulu this is Whiskey One Alpha Whiskey, good evening' "
+    "-> {\"from_call\":\"W1AW\",\"to_call\":\"G3XYZ\"}\n"
+    "'Whiskey One Alpha Whiskey you are five nine, my name is Tom, QTH Bern' -> "
+    "{\"from_call\":null,\"to_call\":\"W1AW\",\"report\":\"59\",\"name\":\"Tom\",\"qth\":\"Bern\"}\n"
+    "\n"
+    "Now extract for THIS over. Ignore weather/equipment chatter — it is not a "
+    "field. The JSON must conform to this schema:\n\n"
+    + over_schema_json()
 )
 
 
@@ -165,3 +247,22 @@ class MLXParser:
             return None
         # Drop explicit nulls so downstream sees only present fields.
         return {k: v for k, v in payload.items() if v is not None}
+
+    def parse_over(self, text: str) -> dict:
+        """Extract one over's fields (speaker/addressed/report/name/qth). Returns
+        a dict with only the present, schema-known fields (callsigns are cleaned
+        downstream); ``{}`` if nothing parsed."""
+        runtime = self._runtime_for()
+        messages = [
+            {"role": "system", "content": OVER_PROMPT},
+            {"role": "user", "content": text},
+        ]
+        payload = extract_json(runtime.generate(messages, prefix='{"from_call":'))
+        if payload is None:
+            messages = messages + [{"role": "user", "content":
+                "Reply with ONLY one JSON object for the schema, nothing else."}]
+            payload = extract_json(runtime.generate(messages, prefix='{"from_call":'))
+        if not isinstance(payload, dict):
+            return {}
+        allowed = set(QSO_OVER_SCHEMA["properties"])
+        return {k: v for k, v in payload.items() if k in allowed and v is not None}

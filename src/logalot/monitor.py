@@ -138,7 +138,7 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
                 from .parse import MLXParser
                 parser = MLXParser()
             except ImportError:
-                print("parse: install the [parse] extra for the candidate panel")
+                print("parse: install the [parse] extra for QSO tracking")
         feed = TranscriptFeed(audio, WhisperTranscriber(language=lang, translate=translate),
                               cat=client, parser=parser, vad_threshold_dbfs=vad_threshold,
                               min_logprob=min_logprob)
@@ -148,7 +148,7 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
         if parser is not None:
             print(f"parse model: {parser.model_path}")
         else:
-            print("parse model: off (candidate panel disabled)")
+            print("parse model: off (QSO tracking disabled)")
     elif enable_asr and audio is not None:
         asr_status = "ASR unavailable — install the [asr] extra (Apple Silicon)"
         print(f"asr: {asr_status}")
@@ -217,7 +217,7 @@ def _sse(payload: dict) -> str:
 
 def _event(msg) -> str:
     """Wrap a feed message as an SSE 'data:' line. Transcript entries get a kind
-    tag; candidate dicts already carry one."""
+    tag; QSO dicts already carry one."""
     if isinstance(msg, TranscriptEntry):
         return _sse({"kind": "transcript", **asdict(msg)})
     return _sse(msg)
@@ -234,8 +234,8 @@ async def _transcript_events(request: Request, feed: TranscriptFeed | None, asr_
     try:
         for e in list(feed.entries):
             yield _event(e)
-        if feed.last_candidate is not None:
-            yield _event(feed.last_candidate)
+        for qso in feed.tracker.all():
+            yield _event(qso.to_dict())
         while True:
             if await request.is_disconnected():
                 break
@@ -259,7 +259,7 @@ _PAGE = """<!doctype html>
   :root { color-scheme: dark; }
   body { margin:0; font:16px/1.4 system-ui,sans-serif; background:#0d1117; color:#e6edf3;
          display:flex; min-height:100vh; align-items:center; justify-content:center; }
-  .panel { width:min(560px,92vw); background:#161b22; border:1px solid #30363d;
+  .panel { width:min(840px,95vw); background:#161b22; border:1px solid #30363d;
            border-radius:14px; padding:28px 32px; box-shadow:0 10px 40px #0008; }
   .top { display:flex; justify-content:space-between; align-items:baseline; }
   h1 { font-size:14px; letter-spacing:.12em; text-transform:uppercase; color:#7d8590; margin:0; font-weight:600; }
@@ -292,12 +292,15 @@ _PAGE = """<!doctype html>
   .rtext { color:#e6edf3; word-break:break-word; }
   .rmeta { color:#6e7681; font-size:11px; white-space:nowrap; }
   .txlog .empty { color:#6e7681; }
-  .cand { margin-top:20px; border-top:1px solid #30363d; padding-top:16px; }
-  .candbody { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; font-size:14px; align-items:baseline; }
-  .ck { color:#7d8590; text-transform:uppercase; font-size:11px; letter-spacing:.06em; }
-  .cv { color:#e6edf3; word-break:break-word; }
-  .cv.call { font-weight:700; font-size:20px; font-variant-numeric:tabular-nums; }
-  .cv.call.ok { color:#2ea043; } .cv.call.review { color:#d29922; }
+  .qsos { margin-top:20px; border-top:1px solid #30363d; padding-top:16px; }
+  .qtable { width:100%; border-collapse:collapse; font-size:13px; }
+  .qtable th { text-align:left; color:#7d8590; font-weight:600; font-size:11px; text-transform:uppercase;
+               letter-spacing:.05em; padding:4px 8px; border-bottom:1px solid #30363d; }
+  .qtable td { padding:7px 8px; border-bottom:1px solid #1c2128; vertical-align:top; }
+  .qcall { font-weight:700; font-variant-numeric:tabular-nums; }
+  .qcall.heard { color:#2ea043; } .qcall.unheard { color:#7d8590; }
+  .qmeta { color:#6e7681; font-size:11px; }
+  .qrep { color:#c9d1d9; font-variant-numeric:tabular-nums; }
   .badge { font-size:10px; border:1px solid #30363d; border-radius:999px; padding:1px 7px;
            color:#7d8590; vertical-align:middle; margin-left:8px; }
   .controls { margin-top:24px; border-top:1px solid #30363d; padding-top:16px;
@@ -331,9 +334,12 @@ _PAGE = """<!doctype html>
       <div class="txhead"><span>Transcript · remote operator (RX)</span><span id="asr">—</span></div>
       <div class="txlog" id="txlog"><span class="empty">waiting for speech…</span></div>
     </div>
-    <div class="cand" id="cand" hidden>
-      <div class="txhead"><span>Candidate QSO<span class="badge">advisory · not logged</span></span></div>
-      <div class="candbody" id="candbody"></div>
+    <div class="qsos" id="qsos" hidden>
+      <div class="txhead"><span>QSOs heard<span class="badge">advisory · not logged</span></span><span class="muted" id="qcount"></span></div>
+      <table class="qtable">
+        <thead><tr><th>time · freq</th><th>station A</th><th>station B</th></tr></thead>
+        <tbody id="qbody"></tbody>
+      </table>
     </div>
     <div class="controls" id="controls" hidden>
       <label for="c_lang">Language</label>
@@ -392,7 +398,7 @@ const es = new EventSource('/api/transcript');
 es.onmessage = (ev) => {
   const d = JSON.parse(ev.data);
   if (d.info !== undefined) { document.getElementById('asr').textContent = d.info; return; }
-  if (d.kind === 'candidate') { renderCandidate(d); return; }
+  if (d.kind === 'qso') { renderQso(d); return; }
   // transcript line
   const asr = document.getElementById('asr'), log = document.getElementById('txlog');
   asr.textContent = 'listening';
@@ -449,31 +455,31 @@ async function loadControls(){
 }
 loadControls();
 
-const CAND_FIELDS = {name:'name', qth:'qth', rst_sent:'rst s', rst_rcvd:'rst r',
-                     gridsquare:'grid', comment:'cmt'};
-function renderCandidate(d){
-  const panel = document.getElementById('cand'), body = document.getElementById('candbody');
-  const rows = [];
-  if (d.call){
-    const aff = d.affixes ? ' <span class="muted">/'+esc(d.affixes.join('/'))+'</span>' : '';
-    const ctry = d.call_country ? ' <span class="muted">· '+esc(d.call_country)+'</span>' : '';
-    rows.push('<div class="ck">call</div><div class="cv call '+(d.call_confidence||'')+'">'+
-              esc(d.call)+aff+ctry+'</div>');
-  } else if (d.call_tentative){
-    rows.push('<div class="ck">call?</div><div class="cv muted">'+esc(d.call_tentative)+
-              ' <span class="badge">unconfirmed</span></div>');
-  }
-  for (const k in CAND_FIELDS) if (d[k])
-    rows.push('<div class="ck">'+CAND_FIELDS[k]+'</div><div class="cv">'+esc(d[k])+'</div>');
-  const rig = [];
-  if (d.freq_mhz != null) rig.push(d.freq_mhz.toFixed(3)+' MHz');
-  if (d.band) rig.push(d.band);
-  if (d.mode) rig.push(d.mode);
-  if (rig.length) rows.push('<div class="ck">rig</div><div class="cv muted">'+esc(rig.join(' · '))+
-                            ' · '+d.qso_date+' '+d.time_on+' UTC</div>');
-  if (d.source_text) rows.push('<div class="ck">heard</div><div class="cv muted">'+esc(d.source_text)+'</div>');
-  body.innerHTML = rows.join('');
-  panel.hidden = false;
+// QSO table — each contact is a row, upserted by id, never overwritten.
+function stationCell(s, report){
+  if (!s || (!s.call && !s.name && !s.qth)) return '<span class="qmeta">—</span>';
+  const cls = s.heard ? 'qcall heard' : 'qcall unheard';
+  const dot = s.heard ? '●' : '○';                 // filled = heard, hollow = named only
+  let h = '<div class="'+cls+'">'+dot+' '+esc(s.call || '?')+'</div>';
+  const meta = [];
+  if (s.country) meta.push(esc(s.country));
+  if (s.name) meta.push(esc(s.name));
+  if (s.qth) meta.push(esc(s.qth));
+  if (meta.length) h += '<div class="qmeta">'+meta.join(' · ')+'</div>';
+  if (report) h += '<div class="qmeta">gave <span class="qrep">'+esc(report)+'</span></div>';
+  return h;
+}
+function renderQso(d){
+  document.getElementById('qsos').hidden = false;
+  const body = document.getElementById('qbody');
+  let tr = document.getElementById('qso-'+d.id);
+  if (!tr){ tr = document.createElement('tr'); tr.id = 'qso-'+d.id; body.appendChild(tr); }
+  const freq = (d.freq_mhz != null ? d.freq_mhz.toFixed(3)+' MHz' : '') + (d.band ? ' · '+d.band : '');
+  tr.innerHTML =
+    '<td><div class="qrep">'+esc(d.updated || '')+'</div><div class="qmeta">'+esc(freq)+'</div></td>'+
+    '<td>'+stationCell(d.a, d.report_a_to_b)+'</td>'+
+    '<td>'+stationCell(d.b, d.report_b_to_a)+'</td>';
+  document.getElementById('qcount').textContent = body.children.length + ' heard';
 }
 </script>
 </body></html>

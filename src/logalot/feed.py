@@ -1,38 +1,59 @@
-"""Step C/D — live transcript + advisory candidate feed.
+"""Live transcript + QSO tracking feed.
 
 A background thread taps the RX audio stream, segments it with
 :class:`logalot.asr.EnergyVAD`, transcribes each utterance, and publishes the
-text to SSE subscribers (Step C). A second debounced thread re-parses the
-accumulated transcript of the current QSO into proposed fields and merges them
-with the CAT-authoritative freq/band/mode/time to produce an *advisory*
-candidate (Step D).
+text to SSE subscribers (the transcript panel).
 
-Everything here is read-only and advisory — it never writes the canonical log.
-The human commits later (M4). Both the transcriber and the parser are injected,
-so the whole pipeline is testable with stubs (no MLX needed).
+A second thread assembles consecutive transcript into *overs* (one station's
+transmission, delimited by a silence gap), runs a per-over LLM extraction
+(speaker / addressed / report / name / qth), and folds each over into the
+stateful :class:`logalot.qso_tracker.QsoTracker` — a persistent list of QSO rows
+rather than one overwritten candidate. QSO updates are published as ``kind:qso``.
+
+Everything is read-only/advisory — it never writes the canonical log; the human
+commits later (M4). The transcriber and parser are injected, so the whole
+pipeline is testable with stubs (no MLX needed).
 """
 from __future__ import annotations
 
 import collections
 import datetime as dt
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
 
 from .asr import EnergyVAD, resample_to_16k
-from .capture import utc_now_adif
-from .dxcc import country_for_call
-from .validate import (
-    NON_CALLSIGNS,
-    expand_phonetics,
-    is_q_code,
-    looks_like_callsign,
-    normalise_call,
-)
+from .qso_tracker import OverRecord, QsoTracker
+from .validate import expand_phonetics, looks_like_callsign, normalise_call
 
-# Optional LLM-extracted fields we carry from the parser onto the candidate.
-_LLM_FIELDS = ("name", "qth", "rst_sent", "rst_rcvd", "gridsquare", "comment")
+_ADDRESSED_WILDCARDS = {"CQ", "CQCQ", "CQDX", "DX"}
+
+# "<to> this is <from>" — small LLMs keep inverting this, but it's a fixed
+# positional rule (the call after 'this is' is the transmitter), so we resolve it
+# deterministically from the text and only fall back to the LLM when absent.
+_THIS_IS_RE = re.compile(r"\b(?:this is|hier ist|here is)\b", re.I)
+_CQ_RE = re.compile(r"\bcq\b", re.I)
+
+
+def positional_from_to(text: str) -> tuple[str | None, str | None]:
+    """Resolve (from_call, to_call) from the '<to> this is <from>' structure.
+    Either may be None; to_call may be 'CQ'. Phonetic words around 'this is' are
+    expanded and validated; over-grabbing is bounded to ~6 words each side."""
+    m = _THIS_IS_RE.search(text)
+    if not m:
+        return None, None
+    before = " ".join(text[:m.start()].split()[-6:])
+    after = " ".join(text[m.end():].split()[:6])
+    frm = expand_phonetics(after)
+    frm = frm if looks_like_callsign(frm) else None
+    if _CQ_RE.search(before):
+        to = "CQ"
+    else:
+        to = expand_phonetics(before)
+        to = to if looks_like_callsign(to) else None
+    return frm, to
 
 
 def is_repetitive(text: str) -> bool:
@@ -57,19 +78,14 @@ class TranscriptEntry:
 
 class TranscriptFeed:
     def __init__(self, audio, transcriber, cat=None, parser=None, history: int = 200,
-                 parse_debounce_s: float = 1.2, qso_idle_reset_s: float = 45.0,
                  vad_threshold_dbfs: float = -45.0, min_logprob: float = -1.0,
-                 parse_window_chars: int = 800) -> None:
+                 over_gap_s: float = 2.5) -> None:
         self.audio = audio
         self.transcriber = transcriber
-        self.cat = cat                 # PTT (skip TX) + CAT snapshot for candidates
-        self.parser = parser           # None -> no candidate panel
-        self.parse_debounce_s = parse_debounce_s
-        self.qso_idle_reset_s = qso_idle_reset_s
-        # Only the most recent ~this-many characters of transcript are parsed, so
-        # the candidate tracks the current exchange rather than a whole ragchew/net
-        # (feeding a small LLM a multi-over wall of text makes it grab stray words).
-        self.parse_window_chars = parse_window_chars
+        self.cat = cat                 # PTT (skip TX) + CAT snapshot for QSO rows
+        self.parser = parser           # None -> transcript only, no QSO table
+        # A silence gap longer than this closes the current over (one transmission).
+        self.over_gap_s = over_gap_s
         # Speech gate: frames above this RMS count as voice. Raise it toward the
         # band noise floor (watch the dashboard's Audio RX dBFS) so SSB hiss
         # doesn't read as one endless utterance.
@@ -78,11 +94,10 @@ class TranscriptFeed:
         # noise garbage (the very negative-logprob lines).
         self.min_logprob = min_logprob
 
+        self.tracker = QsoTracker()
         self.entries: collections.deque[TranscriptEntry] = collections.deque(maxlen=history)
-        self.last_candidate: dict | None = None
-        self._window: collections.deque[TranscriptEntry] = collections.deque(maxlen=16)
-        self._win_version = 0
-        self._last_utterance_at = 0.0
+        self._over: list[TranscriptEntry] = []   # entries of the current open over
+        self._over_last_at = 0.0
 
         self._vad = None               # set in _run; kept so settings can retune it live
         self._subs: list[queue.Queue] = []
@@ -91,8 +106,6 @@ class TranscriptFeed:
         self._threads: list[threading.Thread] = []
 
     # --- live settings (mutated from the dashboard, no restart) ---------------
-    # Each value is read per-segment, so a plain attribute swap takes effect on
-    # the next utterance. Scalar assignment is atomic under the GIL — no lock.
 
     def settings(self) -> dict:
         lang = getattr(self.transcriber, "language", None)
@@ -114,7 +127,6 @@ class TranscriptFeed:
         self.min_logprob = value
 
     def set_language(self, lang: str | None) -> None:
-        # "" / "auto" -> None (Whisper auto-detects the language per segment).
         self.transcriber.language = None if (not lang or lang == "auto") else lang
 
     def set_translate(self, on: bool) -> None:
@@ -132,7 +144,7 @@ class TranscriptFeed:
         self._threads = [threading.Thread(target=self._run, name="transcript-feed", daemon=True)]
         if self.parser is not None:
             self._threads.append(
-                threading.Thread(target=self._parse_loop, name="candidate-parse", daemon=True))
+                threading.Thread(target=self._over_loop, name="qso-tracker", daemon=True))
         for t in self._threads:
             t.start()
 
@@ -193,95 +205,86 @@ class TranscriptFeed:
         )
         with self._lock:
             self.entries.append(entry)
-            # A long gap means a new QSO — start the parse window fresh.
-            now = time.monotonic()
-            if self._window and now - self._last_utterance_at > self.qso_idle_reset_s:
-                self._window.clear()
-            self._window.append(entry)
-            self._last_utterance_at = now
-            self._win_version += 1
+            self._over.append(entry)          # accumulate into the open over
+            self._over_last_at = time.monotonic()
         self._publish(entry)
 
-    # --- candidate (parse) worker --------------------------------------------
+    # --- over assembly / QSO tracking worker ----------------------------------
 
-    def _parse_loop(self) -> None:
-        last_version = -1
+    def _over_loop(self) -> None:
         while not self._stop.wait(0.4):
             with self._lock:
-                version = self._win_version
-                idle = time.monotonic() - self._last_utterance_at
-                text = self._recent_text()
-            if not text or version == last_version:
-                continue
-            if idle < self.parse_debounce_s:   # let the operator finish speaking
-                continue
-            cand = self._build_candidate(text)
-            last_version = version
-            self.last_candidate = cand
-            self._publish(cand)
+                if not self._over or time.monotonic() - self._over_last_at < self.over_gap_s:
+                    continue
+                over_entries = self._over
+                self._over = []
+            self._process_over(over_entries)
 
-    def _recent_text(self) -> str:
-        """Most recent transcript text, newest-first, up to the char budget.
-        Caller holds the lock."""
-        parts: list[str] = []
-        total = 0
-        for e in reversed(self._window):
-            if parts and total + len(e.text) > self.parse_window_chars:
-                break
-            parts.append(e.text)
-            total += len(e.text)
-        return " ".join(reversed(parts))
-
-    def _build_candidate(self, text: str) -> dict:
+    def _process_over(self, entries: list[TranscriptEntry]) -> None:
+        text = " ".join(e.text for e in entries).strip()
+        if not text:
+            return
         try:
-            fields = self.parser.parse(text) or {}
+            fields = self.parser.parse_over(text)
         except Exception:
             fields = {}
-        cand: dict = {"kind": "candidate", "source_text": text}
-        raw_call = fields.get("call")
-        if raw_call:
-            core, affixes = normalise_call(raw_call)
-            # Phonetics backstop: if the LLM left the call as spoken words
-            # ("Echo Golf 20 Radio Charlie Hotel") or only partly expanded it,
-            # recover the characters (-> "EG20RCH").
-            expanded = expand_phonetics(raw_call)
-            if looks_like_callsign(core):
-                resolved = core.upper()
-            elif looks_like_callsign(expanded):
-                resolved = expanded
-            else:
-                resolved = None
-            if resolved:
-                # A complete, valid callsign: this is the call field.
-                cand["call"] = resolved
-                cand["call_confidence"] = "ok"
-                country = country_for_call(resolved)
-                if country:
-                    cand["call_country"] = country
-                if affixes:
-                    cand["affixes"] = affixes
-            else:
-                # Call-like but not a complete valid call (e.g. a partial "G4" or
-                # "EG20"). Show the cleanest form as tentative, separate from the
-                # trusted call field, so a half-heard call never poses as logged.
-                tentative = (expanded or core).upper()
-                if tentative and tentative not in NON_CALLSIGNS and not is_q_code(tentative):
-                    cand["call_tentative"] = tentative
-        for k in _LLM_FIELDS:
-            if fields.get(k):
-                cand[k] = fields[k]
-        cand.update(self._cat_fields())   # CAT is authoritative for freq/band/mode/time
-        return cand
 
-    def _cat_fields(self) -> dict:
-        date, t = utc_now_adif()
-        out: dict = {"qso_date": date, "time_on": t}
+        # Structure (who is from/to) is resolved from the text first — it's a
+        # fixed 'this is' rule the LLM keeps inverting; the LLM fills the gaps.
+        pos_from, pos_to = positional_from_to(text)
+        speaker = pos_from or self._clean_call(fields.get("from_call"))
+        addressed = pos_to or self._clean_addressed(fields.get("to_call"))
+        # Turn-based attribution: an over that addresses X without self-ID is, in a
+        # 2-station QSO, from X's partner. (We don't guess from a bare continuation
+        # over — turns alternate, so the "last speaker" is unreliable.)
+        if speaker is None and addressed and addressed != "CQ":
+            speaker = self.tracker.counterpart(addressed)
+        if speaker is None:
+            return                              # nothing we can attribute
+
+        cat = self._cat_snapshot()
+        over = OverRecord(
+            speaker=speaker,
+            addressed=addressed,
+            report=fields.get("report"),
+            name=fields.get("name"),
+            qth=fields.get("qth"),
+            text=text, utc=cat["utc"],
+            freq_mhz=cat["freq_mhz"], band=cat["band"], mode=cat["mode"],
+        )
+        qso = self.tracker.ingest(over)
+        if qso is not None:
+            self._publish(qso.to_dict())
+
+    # --- helpers --------------------------------------------------------------
+
+    def _clean_call(self, raw) -> str | None:
+        """A raw call (possibly phonetic words) -> a complete valid callsign, or
+        None. Reuses the validate/phonetics backstop."""
+        if not raw:
+            return None
+        core, _ = normalise_call(raw)
+        if looks_like_callsign(core):
+            return core.upper()
+        expanded = expand_phonetics(raw)
+        if looks_like_callsign(expanded):
+            return expanded
+        return None
+
+    def _clean_addressed(self, raw) -> str | None:
+        if not raw:
+            return None
+        if raw.strip().upper() in _ADDRESSED_WILDCARDS:
+            return "CQ"
+        return self._clean_call(raw)
+
+    def _cat_snapshot(self) -> dict:
+        utc = dt.datetime.now(dt.timezone.utc).strftime("%H:%M:%S")
+        out = {"utc": utc, "freq_mhz": None, "band": None, "mode": None}
         if self.cat is not None and hasattr(self.cat, "state"):
             try:
                 st = self.cat.state()
-                out["freq_mhz"] = st.freq_mhz
-                out["band"] = st.band
-                out["mode"] = st.mode
+                out["freq_mhz"], out["band"], out["mode"] = st.freq_mhz, st.band, st.mode
             except Exception:
                 pass
         return out

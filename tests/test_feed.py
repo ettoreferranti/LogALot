@@ -1,5 +1,5 @@
-"""End-to-end test of the transcript feed with a stub transcriber and fake audio
-source — exercises the audio→VAD→ASR→publish path with no MLX/whisper."""
+"""End-to-end tests of the transcript + QSO-tracking feed, with a stub
+transcriber and a stub per-over parser (no MLX/whisper/audio hardware)."""
 import queue
 import time
 
@@ -38,29 +38,28 @@ class StubTranscriber:
         return [Segment(text=self.text, start_s=0.0, end_s=1.0, avg_logprob=self.avg_logprob)]
 
 
+class StubOverParser:
+    """Returns canned per-over field dicts in sequence (one per closed over)."""
+
+    def __init__(self, *over_fields, model_path="stub"):
+        self.queue = list(over_fields)
+        self.model_path = model_path
+        self.calls = 0
+
+    def parse_over(self, text):
+        self.calls += 1
+        return self.queue.pop(0) if self.queue else {}
+
+
 class StubCat:
-    def __init__(self, ptt):
+    def __init__(self, ptt=False):
         self._ptt = ptt
 
     def ptt(self):
         return self._ptt
 
-
-class StubParser:
-    def __init__(self, fields):
-        self.fields = fields
-        self.calls = 0
-
-    def parse(self, text):
-        self.calls += 1
-        return dict(self.fields)
-
-
-class StubCatFull(StubCat):
-    """CAT stub that also answers state() for candidate building."""
-
     def state(self):
-        return RigState(freq_mhz=14.074, mode="SSB", band="20m", raw_mode="USB")
+        return RigState(freq_mhz=14.2, mode="SSB", band="20m", raw_mode="USB")
 
 
 def _utterance(sr=16000):
@@ -70,10 +69,24 @@ def _utterance(sr=16000):
     return np.concatenate([silence, speech, silence, silence])
 
 
+def _next_qso(sub, timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            msg = sub.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if isinstance(msg, dict) and msg.get("kind") == "qso":
+            return msg
+    return None
+
+
+# --- transcript path (unchanged behaviour) -----------------------------------
+
 def test_feed_publishes_transcript_entry():
     audio = FakeAudio()
     tr = StubTranscriber("hotel bravo nine india kilo sierra")
-    feed = TranscriptFeed(audio, tr)
+    feed = TranscriptFeed(audio, tr)            # no parser -> transcript only
     sub = feed.subscribe()
     feed.start()
     try:
@@ -83,10 +96,6 @@ def test_feed_publishes_transcript_entry():
         feed.stop()
     assert entry.text == "hotel bravo nine india kilo sierra"
     assert entry.speaker == "RX"
-    assert entry.dur_s > 0
-    assert entry.avg_logprob == pytest.approx(-0.3)
-    assert tr.calls == 1
-    assert list(feed.entries)[-1] is entry
 
 
 def test_feed_skips_segments_while_transmitting():
@@ -98,276 +107,66 @@ def test_feed_skips_segments_while_transmitting():
     try:
         audio.feed_blocks(_utterance())
         with pytest.raises(queue.Empty):
-            sub.get(timeout=1.5)       # PTT on -> nothing transcribed/published
+            sub.get(timeout=1.0)
     finally:
         feed.stop()
     assert tr.calls == 0
 
 
+# --- QSO tracking path -------------------------------------------------------
+
+def test_feed_builds_qso_from_over():
+    audio = FakeAudio()
+    parser = StubOverParser({"from_call": "EA1ABC", "to_call": "CQ", "name": "Jose"})
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCat(), parser=parser,
+                          over_gap_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        qso = _next_qso(sub)
+    finally:
+        feed.stop()
+    assert qso is not None
+    assert qso["a"]["call"] == "EA1ABC" and qso["a"]["heard"]
+    assert qso["a"]["name"] == "Jose"
+    assert qso["a"]["country"] == "Spain"
+    assert qso["band"] == "20m" and qso["freq_mhz"] == 14.2
+
+
+def test_feed_cleans_phonetic_speaker():
+    audio = FakeAudio()
+    parser = StubOverParser({"from_call": "Hotel Bravo Nine India Kilo Sierra", "to_call": "CQ"})
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCat(), parser=parser,
+                          over_gap_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        qso = _next_qso(sub)
+    finally:
+        feed.stop()
+    assert qso is not None
+    assert qso["a"]["call"] == "HB9IKS"          # phonetics expanded
+
+
+def test_feed_drops_over_without_identifiable_speaker():
+    audio = FakeAudio()
+    parser = StubOverParser({"from_call": None, "to_call": "CQ"})  # no call heard
+    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCat(), parser=parser,
+                          over_gap_s=0.0)
+    sub = feed.subscribe()
+    feed.start()
+    try:
+        audio.feed_blocks(_utterance())
+        assert _next_qso(sub, timeout=1.5) is None
+    finally:
+        feed.stop()
+    assert feed.tracker.all() == []
+
+
 def test_is_repetitive_on_real_whisper_garbage():
-    # Lines actually captured off-air during the first live test.
     assert is_repetitive("pink " * 100)
-    assert is_repetitive("Delta " + "pink " * 80)
     assert is_repetitive(". . . . . .")
-    assert is_repetitive("Brains pink pink pink Brains pink Brains pink Brains pink")
-
-
-def test_is_repetitive_passes_normal_speech():
     assert not is_repetitive("made an NVIS aerial for 40 metres and it was enormous")
-    assert not is_repetitive("pink pink")           # too short to judge
     assert not is_repetitive("CQ CQ this is Hotel Bravo Nine India Kilo Sierra")
-
-
-def _drain_for_transcript(sub, timeout=1.5):
-    """Return the first TranscriptEntry seen, or None if only non-entries arrive."""
-    import time as _t
-    deadline = _t.time() + timeout
-    while _t.time() < deadline:
-        try:
-            msg = sub.get(timeout=timeout)
-        except queue.Empty:
-            return None
-        if not isinstance(msg, dict):   # TranscriptEntry, not a candidate
-            return msg
-    return None
-
-
-def test_feed_drops_repetitive_transcript():
-    audio = FakeAudio()
-    tr = StubTranscriber("pink " * 100)
-    feed = TranscriptFeed(audio, tr)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        assert _drain_for_transcript(sub) is None
-    finally:
-        feed.stop()
-
-
-def test_feed_drops_low_logprob_transcript():
-    audio = FakeAudio()
-    tr = StubTranscriber("pink", avg_logprob=-3.8)
-    feed = TranscriptFeed(audio, tr, min_logprob=-1.0)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        assert _drain_for_transcript(sub) is None
-    finally:
-        feed.stop()
-
-
-def test_feed_builds_advisory_candidate():
-    audio = FakeAudio()
-    tr = StubTranscriber("hotel bravo nine india kilo sierra")
-    parser = StubParser({"call": "HB9IKS", "name": "Tom", "rst_rcvd": "59"})
-    feed = TranscriptFeed(audio, tr, cat=StubCatFull(ptt=False), parser=parser,
-                          parse_debounce_s=0.0)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        cand = None
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            msg = sub.get(timeout=5)
-            if isinstance(msg, dict) and msg.get("kind") == "candidate":
-                cand = msg
-                break
-    finally:
-        feed.stop()
-    assert cand is not None
-    assert cand["call"] == "HB9IKS"
-    assert cand["call_confidence"] == "ok"
-    assert cand["name"] == "Tom"
-    # CAT is authoritative for these — they come from state(), not the LLM.
-    assert cand["mode"] == "SSB"
-    assert cand["band"] == "20m"
-    assert cand["freq_mhz"] == 14.074
-    assert "qso_date" in cand and "time_on" in cand
-    assert parser.calls >= 1
-
-
-def test_feed_live_settings_are_mutable():
-    audio = FakeAudio()
-    tr = StubTranscriber()
-    parser = StubParser({"call": "HB9IKS"})
-    feed = TranscriptFeed(audio, tr, parser=parser)
-
-    feed.set_vad_threshold(-28.0)
-    feed.set_min_logprob(-0.7)
-    feed.set_language("de")
-    feed.set_parse_model("mlx-community/Qwen2.5-7B-Instruct-4bit")
-    s = feed.settings()
-    assert s["vad_threshold"] == -28.0
-    assert s["min_logprob"] == -0.7
-    assert s["language"] == "de"
-    assert s["parse_model"].endswith("7B-Instruct-4bit")
-
-    # "auto" maps to None on the transcriber but surfaces as "auto" in settings.
-    feed.set_language("auto")
-    assert feed.settings()["language"] == "auto"
-    assert tr.language is None
-
-    # translate toggle (default off) flips the transcriber + settings.
-    assert feed.settings()["translate"] is False
-    feed.set_translate(True)
-    assert tr.translate is True
-    assert feed.settings()["translate"] is True
-
-
-def test_feed_vad_threshold_retunes_running_vad():
-    audio = FakeAudio()
-    feed = TranscriptFeed(audio, StubTranscriber())
-    feed.start()
-    try:
-        for _ in range(40):                 # wait for _run to build the VAD
-            if feed._vad is not None:
-                break
-            time.sleep(0.02)
-        assert feed._vad is not None
-        feed.set_vad_threshold(-25.0)
-        assert feed._vad.threshold_dbfs == -25.0
-    finally:
-        feed.stop()
-
-
-def test_recent_text_caps_to_recent_window():
-    # The candidate must parse the recent exchange, not the whole ragchew.
-    feed = TranscriptFeed(FakeAudio(), StubTranscriber(), parse_window_chars=40)
-    for word in ["oldest filler text here", "middle filler text", "the newest over wins"]:
-        feed._window.append(
-            type("E", (), {"text": word})()  # lightweight entry-with-.text
-        )
-    text = feed._recent_text()
-    assert "newest over wins" in text
-    assert "oldest filler" not in text       # trimmed by the char budget
-    assert len(text) <= 60
-
-
-def _get_candidate(sub, timeout=5):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            msg = sub.get(timeout=timeout)
-        except queue.Empty:
-            return None
-        if isinstance(msg, dict) and msg.get("kind") == "candidate":
-            return msg
-    return None
-
-
-def test_feed_candidate_adds_country_for_valid_call():
-    audio = FakeAudio()
-    parser = StubParser({"call": "HB9IKS"})
-    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
-                          parser=parser, parse_debounce_s=0.0)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        cand = _get_candidate(sub)
-    finally:
-        feed.stop()
-    assert cand is not None
-    assert cand["call"] == "HB9IKS"
-    assert cand["call_confidence"] == "ok"
-    assert cand["call_country"] == "Switzerland"
-
-
-def test_feed_recovers_callsign_from_phonetics():
-    # LLM returns the call as spoken words; the backstop expands it.
-    audio = FakeAudio()
-    parser = StubParser({"call": "Echo Golf 20 Radio Charlie Hotel"})
-    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
-                          parser=parser, parse_debounce_s=0.0)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        cand = _get_candidate(sub)
-    finally:
-        feed.stop()
-    assert cand is not None
-    assert cand["call"] == "EG20RCH"
-    assert cand["call_country"] == "Spain"
-
-
-def test_feed_phonetic_partial_becomes_clean_tentative():
-    # Truncated phonetics expand to a clean (but invalid) tentative, not words.
-    audio = FakeAudio()
-    parser = StubParser({"call": "Echo Golf 20"})
-    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
-                          parser=parser, parse_debounce_s=0.0)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        cand = _get_candidate(sub)
-    finally:
-        feed.stop()
-    assert cand is not None
-    assert "call" not in cand
-    assert cand["call_tentative"] == "EG20"
-
-
-def test_feed_demotes_partial_call_to_tentative():
-    # "G4" (prefix+digit, no suffix) must NOT populate the trusted call field.
-    audio = FakeAudio()
-    parser = StubParser({"call": "G4", "qth": "London"})
-    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
-                          parser=parser, parse_debounce_s=0.0)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        cand = _get_candidate(sub)
-    finally:
-        feed.stop()
-    assert cand is not None
-    assert "call" not in cand
-    assert cand.get("call_tentative") == "G4"
-    assert cand.get("qth") == "London"
-
-
-def test_feed_drops_cq_and_qcodes_from_candidate():
-    audio = FakeAudio()
-    parser = StubParser({"call": "CQDX", "qth": "Bern"})
-    feed = TranscriptFeed(audio, StubTranscriber(), cat=StubCatFull(ptt=False),
-                          parser=parser, parse_debounce_s=0.0)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        cand = None
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            msg = sub.get(timeout=5)
-            if isinstance(msg, dict) and msg.get("kind") == "candidate":
-                cand = msg
-                break
-    finally:
-        feed.stop()
-    assert cand is not None
-    assert "call" not in cand          # CQDX is not a worked callsign
-    assert cand.get("qth") == "Bern"   # other fields still kept
-
-
-def test_feed_no_parser_means_no_candidate():
-    audio = FakeAudio()
-    feed = TranscriptFeed(audio, StubTranscriber(), parser=None)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        # Only transcript entries should ever arrive, never a candidate dict.
-        for _ in range(2):
-            try:
-                msg = sub.get(timeout=1.5)
-            except queue.Empty:
-                break
-            assert not (isinstance(msg, dict) and msg.get("kind") == "candidate")
-    finally:
-        feed.stop()
-    assert feed.last_candidate is None

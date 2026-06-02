@@ -84,3 +84,21 @@ def test_parser_retries_once_on_unparseable_output():
 def test_parser_returns_none_when_call_is_null():
     rt = FakeRuntime([' null, "name": "Tom"}'])
     assert MLXParser(runtime=rt).parse("just chatting, no call") is None
+
+
+def test_parse_over_extracts_from_and_to():
+    rt = FakeRuntime([' "EA1ABC", "to_call": "CQ", "name": "Jose"}'])
+    out = MLXParser(runtime=rt).parse_over("CQ CQ this is EA1ABC, name Jose")
+    assert out == {"from_call": "EA1ABC", "to_call": "CQ", "name": "Jose"}
+    assert rt.prefixes == ['{"from_call":']       # over-priming used
+
+
+def test_parse_over_drops_nulls_and_unknown_keys():
+    rt = FakeRuntime([' "G4XYZ", "to_call": null, "report": "59", "junk": "x"}'])
+    out = MLXParser(runtime=rt).parse_over("this is G4XYZ, you are 59")
+    assert out == {"from_call": "G4XYZ", "report": "59"}
+
+
+def test_parse_over_empty_when_unparseable():
+    rt = FakeRuntime([" sorry no json", " still no json"])
+    assert MLXParser(runtime=rt).parse_over("noise") == {}
