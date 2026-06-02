@@ -30,6 +30,17 @@ from .mlx_runtime import DEFAULT_PARSE_MODEL, is_available
 # "auto" (per-segment detection). Operators can still pass any code via the CLI.
 _LANGUAGES = ["auto", "en", "de", "fr", "it", "es", "nl", "pt", "ru", "pl", "sv", "cs"]
 
+# Preset mlx-community whisper (ASR) models. NB: large-v3-turbo is fast but was
+# trained for transcription only — it cannot translate. Use a non-turbo model
+# (large-v3 / medium / small / tiny) for the Translate→EN toggle.
+_ASR_MODELS = [
+    "mlx-community/whisper-large-v3-turbo",   # fast, transcribe-only (no translate)
+    "mlx-community/whisper-large-v3-mlx",      # full large-v3 — translates, slower
+    "mlx-community/whisper-medium-mlx",        # translates, faster than large
+    "mlx-community/whisper-small-mlx",
+    "mlx-community/whisper-tiny",              # fastest, low accuracy
+]
+
 # Preset mlx-community parse models, small→large. The running default is added in
 # the settings payload if it isn't already here.
 _PARSE_MODELS = [
@@ -168,15 +179,19 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
     def get_settings() -> JSONResponse:
         if feed is None:
             return JSONResponse({"ok": False})
+        s = feed.settings()
         models = list(_PARSE_MODELS)
-        current = feed.settings().get("parse_model")
-        if current and current not in models:
-            models.insert(0, current)
+        if s.get("parse_model") and s["parse_model"] not in models:
+            models.insert(0, s["parse_model"])
+        asr_models = list(_ASR_MODELS)
+        if s.get("asr_model") and s["asr_model"] not in asr_models:
+            asr_models.insert(0, s["asr_model"])
         return JSONResponse({
             "ok": True,
-            "settings": feed.settings(),
+            "settings": s,
             "languages": _LANGUAGES,
             "parse_models": models,
+            "asr_models": asr_models,
             "has_parser": feed.parser is not None,
         })
 
@@ -193,6 +208,8 @@ def create_app(rig_host: str = "127.0.0.1", rig_port: int = 4532,
             feed.set_language(body["language"])
         if "translate" in body:
             feed.set_translate(body["translate"])
+        if "asr_model" in body:
+            feed.set_asr_model(body["asr_model"])
         if "parse_model" in body:
             feed.set_parse_model(body["parse_model"])
         return JSONResponse({"ok": True, "settings": feed.settings()})
@@ -347,6 +364,9 @@ _PAGE = """<!doctype html>
       <label for="c_xlate">Translate→EN</label>
       <input type="checkbox" id="c_xlate" style="justify-self:start; width:18px; height:18px; accent-color:#1f6feb;">
       <span class="val" id="c_xlate_v"></span>
+      <label for="c_asr">ASR model</label>
+      <select id="c_asr"></select><span class="val"></span>
+      <span class="full" id="c_warn" style="grid-column:1 / -1; color:#d29922; font-size:12px;"></span>
       <label for="c_vad">VAD gate</label>
       <input type="range" id="c_vad" min="-60" max="-10" step="1"><span class="val" id="c_vad_v"></span>
       <label for="c_lp">Min logprob</label>
@@ -430,7 +450,18 @@ async function loadControls(){
 
   const xl = $('c_xlate'); xl.checked = !!s.translate;
   $('c_xlate_v').textContent = s.translate ? 'on' : 'off';
-  xl.onchange = () => { postSettings({translate: xl.checked}); $('c_xlate_v').textContent = xl.checked ? 'on' : 'off'; };
+  xl.onchange = () => { postSettings({translate: xl.checked}); $('c_xlate_v').textContent = xl.checked ? 'on' : 'off'; warnTranslate(); };
+
+  const asr = $('c_asr');
+  asr.innerHTML = d.asr_models.map(m =>
+    '<option value="'+m+'"'+(m===s.asr_model?' selected':'')+'>'+esc(m.replace('mlx-community/whisper-',''))+'</option>').join('');
+  asr.onchange = () => { postSettings({asr_model: asr.value}); warnTranslate(); };
+  function warnTranslate(){
+    const turbo = asr.value.includes('turbo');
+    $('c_warn').textContent = (xl.checked && turbo)
+      ? '⚠ whisper-large-v3-turbo cannot translate — pick large-v3 / medium / small / tiny for Translate→EN.' : '';
+  }
+  warnTranslate();
 
   const vad = $('c_vad'); vad.value = s.vad_threshold;
   $('c_vad_v').textContent = s.vad_threshold + ' dBFS';
@@ -441,8 +472,6 @@ async function loadControls(){
   $('c_lp_v').textContent = (+s.min_logprob).toFixed(1);
   lp.oninput  = () => $('c_lp_v').textContent = (+lp.value).toFixed(1);
   lp.onchange = () => postSettings({min_logprob: parseFloat(lp.value)});
-
-  $('c_asr').textContent = (s.asr_model || '').replace('mlx-community/', '');
 
   const ml = $('c_model');
   if (d.has_parser){

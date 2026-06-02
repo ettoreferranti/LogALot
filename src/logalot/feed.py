@@ -132,6 +132,11 @@ class TranscriptFeed:
     def set_translate(self, on: bool) -> None:
         self.transcriber.translate = bool(on)
 
+    def set_asr_model(self, model_path: str) -> None:
+        if model_path and model_path != getattr(self.transcriber, "model_path", None):
+            self.transcriber.model_path = model_path   # loads on next utterance
+            print(f"asr: model set to {model_path} (loads on next utterance)", flush=True)
+
     def set_parse_model(self, model_path: str) -> None:
         if self.parser is not None and model_path and \
                 model_path != getattr(self.parser, "model_path", None):

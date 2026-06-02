@@ -165,6 +165,19 @@ def test_feed_drops_over_without_identifiable_speaker():
     assert feed.tracker.all() == []
 
 
+def test_feed_live_model_and_translate_setters():
+    audio = FakeAudio()
+    tr = StubTranscriber()
+    tr.model_path = "mlx-community/whisper-large-v3-turbo"
+    feed = TranscriptFeed(audio, tr, parser=StubOverParser())
+    feed.set_translate(True)
+    feed.set_asr_model("mlx-community/whisper-large-v3-mlx")
+    s = feed.settings()
+    assert s["translate"] is True
+    assert s["asr_model"].endswith("whisper-large-v3-mlx")
+    assert tr.translate is True
+
+
 def test_is_repetitive_on_real_whisper_garbage():
     assert is_repetitive("pink " * 100)
     assert is_repetitive(". . . . . .")
