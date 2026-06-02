@@ -57,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="use only cached models; skip all HuggingFace network checks")
     m.add_argument("--translate", action="store_true",
                    help="translate non-English speech to English (default off); tunable live")
+    m.add_argument("--enhance", action="store_true",
+                   help="denoise RX audio before ASR (needs [enhance] extra); tunable live")
     m.add_argument("--list-audio", action="store_true",
                    help="list input devices and exit")
 
@@ -195,7 +197,8 @@ def _run_monitor(args) -> int:
                          audio_device=args.audio_device, enable_audio=not args.no_audio,
                          enable_asr=not args.no_asr, enable_parse=not args.no_parse,
                          vad_threshold=args.vad_threshold, min_logprob=args.min_logprob,
-                         language=args.language, translate=args.translate)
+                         language=args.language, translate=args.translate,
+                     enable_enhance=args.enhance)
         print(f"rig monitor on http://{args.host}:{args.port}  (rigctld {args.rig_host}:{args.rig_port})")
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     except KeyboardInterrupt:
