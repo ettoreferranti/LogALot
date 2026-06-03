@@ -23,15 +23,17 @@ from .mlx_runtime import DEFAULT_ASR_MODEL, run_blocking
 
 # Seeds Whisper's decoder with ham-radio idiom so it stops mis-hearing the genre's
 # core words — without it, "CQ" reliably becomes "secure"/"sicchio", phonetics
-# drift, and signal reports garble. Whisper uses the prompt as prior-context for
-# the first window (it applies even with condition_on_previous_text=False). Kept
-# short and front-loaded with "CQ"; an over-long prompt over-biases and can
-# induce hallucinations of these words on pure noise.
+# drift, and signal reports garble. Whisper applies this as prior context to every
+# segment (each VAD utterance is a fresh transcribe call), so on low-information
+# audio it can regurgitate the prompt. Deliberately a terse token glossary, NOT a
+# spoken-sentence ("Amateur radio voice contact. Calling CQ…" leaked back verbatim
+# as fake overs): a leak now yields only plausible ham tokens, which feed's
+# is_prompt_echo() then drops because they carry no callsign.
 HAM_PROMPT = (
-    "Amateur radio voice contact. Calling CQ: \"CQ CQ CQ\". NATO phonetics: "
-    "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliet Kilo Lima "
-    "Mike November Oscar Papa Quebec Romeo Sierra Tango Uniform Victor Whiskey "
-    "X-ray Yankee Zulu. Signal report five nine. QRZ QSL QTH RST 73 over."
+    "CQ CQ CQ. QRZ. Phonetics: Alpha Bravo Charlie Delta Echo Foxtrot Golf "
+    "Hotel India Juliet Kilo Lima Mike November Oscar Papa Quebec Romeo Sierra "
+    "Tango Uniform Victor Whiskey X-ray Yankee Zulu. Signal report five nine. "
+    "QSL QTH RST 73."
 )
 
 

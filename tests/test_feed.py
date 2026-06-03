@@ -9,7 +9,8 @@ np = pytest.importorskip("numpy")
 
 from logalot.asr import Segment  # noqa: E402
 from logalot.capture import RigState  # noqa: E402
-from logalot.feed import TranscriptFeed, is_repetitive  # noqa: E402
+from logalot.asr import HAM_PROMPT  # noqa: E402
+from logalot.feed import TranscriptFeed, is_prompt_echo, is_repetitive  # noqa: E402
 
 
 class FakeAudio:
@@ -183,3 +184,15 @@ def test_is_repetitive_on_real_whisper_garbage():
     assert is_repetitive(". . . . . .")
     assert not is_repetitive("made an NVIS aerial for 40 metres and it was enormous")
     assert not is_repetitive("CQ CQ this is Hotel Bravo Nine India Kilo Sierra")
+
+
+def test_is_prompt_echo_drops_regurgitated_prompt():
+    # Pure prompt regurgitation on noise — every word comes from HAM_PROMPT.
+    assert is_prompt_echo("CQ CQ CQ. QRZ.", HAM_PROMPT)
+    assert is_prompt_echo("Alpha Bravo Charlie Delta Echo", HAM_PROMPT)
+    # Real speech carries novel words (a callsign, chatter) -> survives.
+    assert not is_prompt_echo("CQ CQ this is Hotel Bravo Nine India Kilo Sierra", HAM_PROMPT)
+    assert not is_prompt_echo("November Whiskey go ahead", HAM_PROMPT)
+    # Under 3 words is exempt; no prompt means no filtering.
+    assert not is_prompt_echo("five nine", HAM_PROMPT)
+    assert not is_prompt_echo("CQ CQ CQ", None)

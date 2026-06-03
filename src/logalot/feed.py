@@ -67,6 +67,22 @@ def is_repetitive(text: str) -> bool:
     return most / len(words) > 0.5
 
 
+def is_prompt_echo(text: str, prompt: str | None) -> bool:
+    """True if every word of `text` came from the ASR `initial_prompt` vocabulary
+    — Whisper regurgitating its prompt on low-information audio instead of copying
+    speech (see asr.HAM_PROMPT). A real transmission always carries a callsign or
+    other words absent from the prompt, so it has at least one novel token; a pure
+    echo ('CQ CQ CQ. QRZ.') has none. Segments under 3 words are exempt so a brief
+    genuine 'five nine' survives."""
+    if not prompt:
+        return False
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    if len(words) < 3:
+        return False
+    vocab = set(re.findall(r"[a-z0-9']+", prompt.lower()))
+    return all(w in vocab for w in words)
+
+
 @dataclass(slots=True)
 class TranscriptEntry:
     utc: str
@@ -195,7 +211,8 @@ class TranscriptFeed:
         audio16k = resample_to_16k(seg, self.audio.samplerate)
         segments = self.transcriber.transcribe(audio16k)
         text = " ".join(s.text for s in segments).strip()
-        if not text or is_repetitive(text):
+        prompt = getattr(self.transcriber, "initial_prompt", None)
+        if not text or is_repetitive(text) or is_prompt_echo(text, prompt):
             return
         logps = [s.avg_logprob for s in segments if s.avg_logprob is not None]
         avg_logprob = sum(logps) / len(logps) if logps else None
