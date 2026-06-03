@@ -7,10 +7,10 @@ the RX stream into utterances; each segment is transcribed and handed to
 stage and no amount of cleverness downstream fully recovers it.
 
 Transcription runs on the shared Metal worker thread (see
-:mod:`logalot.mlx_runtime`) so it never collides with the parse LLM. ``default
-large-v3-turbo`` trades a little accuracy for the throughput we need near real
-time; set ``LOGALOT_ASR_MODEL`` to ``mlx-community/whisper-large-v3-mlx`` for
-maximum accuracy at lower speed.
+:mod:`logalot.mlx_runtime`) so it never collides with the parse LLM. The default
+is full ``large-v3`` for best copy on weak/accented SSB; set ``LOGALOT_ASR_MODEL``
+(or the UI dropdown) to ``mlx-community/whisper-large-v3-turbo`` to trade a little
+accuracy for throughput (turbo is transcribe-only — it cannot translate).
 """
 from __future__ import annotations
 

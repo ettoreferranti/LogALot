@@ -66,13 +66,16 @@ _MLX_WORKER = _MetalWorker()
 # Default models, overridable by env so we never hard-code a single choice.
 # Parse: Qwen2.5 instruct follows JSON instructions well (code-rally precedent).
 # Apertus (ETH/EPFL, Swiss) is the natural HB9 alternative once an MLX quant is
-# handy — set LOGALOT_PARSE_MODEL to swap. ASR: large-v3-turbo trades a little
-# accuracy for the throughput we need near real time on weak SSB.
+# handy — set LOGALOT_PARSE_MODEL to swap. Defaults favour accuracy: Qwen-14B
+# (~8 GB) is markedly better at from/to attribution and name/QTH on messy overs,
+# and full large-v3 copies weak/accented SSB better than turbo (which also can't
+# translate). Both are comfortable on a 48 GB M4; drop to 7B / turbo in the UI or
+# via env for more speed.
 DEFAULT_PARSE_MODEL = os.environ.get(
-    "LOGALOT_PARSE_MODEL", "mlx-community/Qwen2.5-7B-Instruct-4bit"
+    "LOGALOT_PARSE_MODEL", "mlx-community/Qwen2.5-14B-Instruct-4bit"
 )
 DEFAULT_ASR_MODEL = os.environ.get(
-    "LOGALOT_ASR_MODEL", "mlx-community/whisper-large-v3-turbo"
+    "LOGALOT_ASR_MODEL", "mlx-community/whisper-large-v3-mlx"
 )
 
 
