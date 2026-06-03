@@ -21,6 +21,19 @@ from typing import Protocol
 from .audio import rms_to_dbfs
 from .mlx_runtime import DEFAULT_ASR_MODEL, run_blocking
 
+# Seeds Whisper's decoder with ham-radio idiom so it stops mis-hearing the genre's
+# core words — without it, "CQ" reliably becomes "secure"/"sicchio", phonetics
+# drift, and signal reports garble. Whisper uses the prompt as prior-context for
+# the first window (it applies even with condition_on_previous_text=False). Kept
+# short and front-loaded with "CQ"; an over-long prompt over-biases and can
+# induce hallucinations of these words on pure noise.
+HAM_PROMPT = (
+    "Amateur radio voice contact. Calling CQ: \"CQ CQ CQ\". NATO phonetics: "
+    "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliet Kilo Lima "
+    "Mike November Oscar Papa Quebec Romeo Sierra Tango Uniform Victor Whiskey "
+    "X-ray Yankee Zulu. Signal report five nine. QRZ QSL QTH RST 73 over."
+)
+
 
 @dataclass(slots=True)
 class Segment:
@@ -155,12 +168,14 @@ class WhisperTranscriber:
     capture ring buffer hands us after resampling the 48 kHz USB CODEC stream)."""
 
     def __init__(self, model_path: str = DEFAULT_ASR_MODEL, language: str | None = "en",
-                 translate: bool = False) -> None:
+                 translate: bool = False, initial_prompt: str | None = HAM_PROMPT) -> None:
         self.model_path = model_path
         self.language = language
         # translate=True -> Whisper renders any language into English (task
         # "translate"); False -> transcribe in the spoken language.
         self.translate = translate
+        # Domain vocabulary prior (see HAM_PROMPT); None disables it.
+        self.initial_prompt = initial_prompt
 
     def transcribe(self, audio) -> list[Segment]:
         def _run() -> dict:
@@ -172,6 +187,7 @@ class WhisperTranscriber:
                 audio, path_or_hf_repo=self.model_path, language=self.language,
                 task="translate" if self.translate else "transcribe",
                 condition_on_previous_text=False,
+                initial_prompt=self.initial_prompt,
             )
 
         result = run_blocking(_run)

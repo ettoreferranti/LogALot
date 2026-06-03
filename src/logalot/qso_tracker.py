@@ -127,6 +127,12 @@ class QsoTracker:
         if not speaker:
             return None
         addressed = over.addressed if over.addressed not in _WILDCARD else None
+        # A station can't work itself: when the parser splits one spoken callsign
+        # into two near-identical reads (e.g. "India Radio Zero / Radio Charlie
+        # Alpha Golf" both -> IR0CAG), from_call == to_call. Drop the self-address
+        # so the counterpart slot stays empty instead of duplicating the speaker.
+        if addressed == speaker:
+            addressed = None
         now = time.monotonic()
 
         qso = self._match(speaker, addressed, over.band, now)

@@ -178,54 +178,6 @@ def test_feed_live_model_and_translate_setters():
     assert tr.translate is True
 
 
-class FakeEnhancer:
-    def __init__(self):
-        self.calls = 0
-
-    def enhance(self, audio):
-        self.calls += 1
-        return audio
-
-
-def test_feed_applies_enhancer_when_on():
-    audio = FakeAudio()
-    enh = FakeEnhancer()
-    feed = TranscriptFeed(audio, StubTranscriber(), enhancer=enh, enhance=True)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        sub.get(timeout=3.0)
-    finally:
-        feed.stop()
-    assert enh.calls >= 1
-    s = feed.settings()
-    assert s["enhance"] is True and s["enhance_available"] is True
-
-
-def test_feed_skips_enhancer_when_off_and_toggles_live():
-    audio = FakeAudio()
-    enh = FakeEnhancer()
-    feed = TranscriptFeed(audio, StubTranscriber(), enhancer=enh, enhance=False)
-    sub = feed.subscribe()
-    feed.start()
-    try:
-        audio.feed_blocks(_utterance())
-        sub.get(timeout=3.0)
-    finally:
-        feed.stop()
-    assert enh.calls == 0
-    feed.set_enhance(True)
-    assert feed.settings()["enhance"] is True
-
-
-def test_feed_enhance_unavailable_without_enhancer():
-    feed = TranscriptFeed(FakeAudio(), StubTranscriber(), enhancer=None, enhance=True)
-    s = feed.settings()
-    assert s["enhance_available"] is False
-    assert s["enhance"] is False        # can't enable without an enhancer
-
-
 def test_is_repetitive_on_real_whisper_garbage():
     assert is_repetitive("pink " * 100)
     assert is_repetitive(". . . . . .")

@@ -79,13 +79,11 @@ class TranscriptEntry:
 class TranscriptFeed:
     def __init__(self, audio, transcriber, cat=None, parser=None, history: int = 200,
                  vad_threshold_dbfs: float = -45.0, min_logprob: float = -1.0,
-                 over_gap_s: float = 2.5, enhancer=None, enhance: bool = False) -> None:
+                 over_gap_s: float = 2.5) -> None:
         self.audio = audio
         self.transcriber = transcriber
         self.cat = cat                 # PTT (skip TX) + CAT snapshot for QSO rows
         self.parser = parser           # None -> transcript only, no QSO table
-        self.enhancer = enhancer       # learned denoiser before Whisper (optional)
-        self.enhance_on = bool(enhance) and enhancer is not None
         # A silence gap longer than this closes the current over (one transmission).
         self.over_gap_s = over_gap_s
         # Speech gate: frames above this RMS count as voice. Raise it toward the
@@ -118,8 +116,6 @@ class TranscriptFeed:
             "translate": bool(getattr(self.transcriber, "translate", False)),
             "asr_model": getattr(self.transcriber, "model_path", None),
             "parse_model": getattr(self.parser, "model_path", None),
-            "enhance": self.enhance_on,
-            "enhance_available": self.enhancer is not None,
         }
 
     def set_vad_threshold(self, dbfs: float) -> None:
@@ -135,9 +131,6 @@ class TranscriptFeed:
 
     def set_translate(self, on: bool) -> None:
         self.transcriber.translate = bool(on)
-
-    def set_enhance(self, on: bool) -> None:
-        self.enhance_on = bool(on) and self.enhancer is not None
 
     def set_asr_model(self, model_path: str) -> None:
         if model_path and model_path != getattr(self.transcriber, "model_path", None):
@@ -200,11 +193,6 @@ class TranscriptFeed:
         if self._transmitting():
             return
         audio16k = resample_to_16k(seg, self.audio.samplerate)
-        if self.enhance_on and self.enhancer is not None:
-            try:
-                audio16k = self.enhancer.enhance(audio16k)
-            except Exception as e:
-                print(f"enhance: failed, using raw audio ({e})", flush=True)
         segments = self.transcriber.transcribe(audio16k)
         text = " ".join(s.text for s in segments).strip()
         if not text or is_repetitive(text):

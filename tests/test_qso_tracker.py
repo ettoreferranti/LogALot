@@ -70,6 +70,16 @@ def test_unattributable_over_is_dropped():
     assert t.qsos == []
 
 
+def test_self_address_does_not_duplicate_speaker():
+    # Parser split one spoken call into two near-identical reads -> from==to.
+    # The CQ caller must not appear as its own counterpart.
+    t = QsoTracker()
+    q = t.ingest(_over("IR0CAG", "IR0CAG", text="India Radio Zero Charlie Alpha Golf CQ 20"))
+    assert q.a.call == "IR0CAG" and q.a.heard
+    assert q.b.call is None and not q.b.heard       # counterpart still empty
+    assert q.calls() == {"IR0CAG"}
+
+
 def test_to_dict_shape():
     t = QsoTracker()
     q = t.ingest(_over("EA1ABC", "G4XYZ", report="59"))

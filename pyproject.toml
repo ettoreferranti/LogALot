@@ -17,10 +17,9 @@ dependencies = []
 capture = ["sounddevice>=0.4", "numpy>=1.26"]   # + Hamlib rigctld running externally
 asr     = ["mlx-whisper>=0.4", "numpy>=1.26"]
 parse   = ["mlx-lm>=0.19", "mlx>=0.18"]
-enhance = ["torch>=2.2"]                          # Demucs DNS denoiser via torch.hub
 ui      = ["fastapi>=0.110", "uvicorn>=0.29"]
 dev     = ["pytest>=8.0"]
-all     = ["logalot[capture,asr,parse,enhance,ui,dev]"]
+all     = ["logalot[capture,asr,parse,ui,dev]"]
 
 [project.scripts]
 logalot = "logalot.__main__:main"
