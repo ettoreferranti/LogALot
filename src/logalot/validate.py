@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import re
 
-# Pragmatic callsign pattern: prefix (1-3 alnum incl. a digit) + region digit +
-# 1-4 letter suffix. Matches HB9IKS, W1AW, 4X4AA, 2E0ABC; rejects bare words.
-_CALL_RE = re.compile(r"^[A-Z0-9]{1,3}[0-9][A-Z]{1,4}$")
+# Pragmatic callsign pattern: prefix (1-3 alnum incl. a digit) + a digit group +
+# 1-4 letter suffix. The digit group is 1-4 digits so special-event/year calls
+# (DL2026R, EG20XXX) validate alongside ordinary ones (HB9IKS, W1AW, 4X4AA,
+# 2E0ABC); still rejects bare words. The wider group lets more phonetic garble
+# through too, but candidates are advisory (the human commits), and missing the
+# band's dominant station is the worse failure.
+_CALL_RE = re.compile(r"^[A-Z0-9]{1,3}[0-9]{1,4}[A-Z]{1,4}$")
 
 # Every Q-code is the letter Q followed by two letters (QTH, QSL, QRZ, …). One
 # rule covers all of them — no list to maintain — so the parser can never log a

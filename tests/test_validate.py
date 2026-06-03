@@ -42,6 +42,12 @@ def test_valid_calls():
         assert is_valid_call(c), c
 
 
+def test_valid_special_event_calls():
+    # Multi-digit region groups: year-themed / anniversary special-event calls.
+    for c in ["DL2026R", "EG20RCH", "OE100M"]:
+        assert is_valid_call(c), c
+
+
 def test_invalid_calls():
     for c in ["HELLO", "CQ", "123", ""]:
         assert not is_valid_call(c), c
